@@ -80,9 +80,20 @@ static void check_file(const char* filepath)
 	}
 }
 
+static void check_string(const acl::string& key, const acl::string& plain)
+{
+	acl::md5 md5;
+	if (!key.empty()) {
+		md5.update(key, key.size());
+	}
+
+	const char* res = md5.update(plain, plain.size()).finish().get_string();
+	printf("key=%s, plain=%s, res=%s\r\n", key.c_str(), plain.c_str(), res);
+}
+
 static void usage(const char* procname)
 {
-	printf("usage: %s -h[help] -f filepath\r\n", procname);
+	printf("usage: %s -h[help] -f filepath -k key_for_string -s plain_string\r\n", procname);
 #if defined(_WIN32) || defined(_WIN64)
 	printf("Enter any key to continue...");
 	fflush(stdout);
@@ -90,12 +101,13 @@ static void usage(const char* procname)
 
 #endif
 }
+
 int main(int argc, char* argv[])
 {
 	int ch;
-	acl::string filepath;
+	acl::string filepath, plain, key;
 
-	while ((ch = getopt(argc, argv, "hf:")) > 0) {
+	while ((ch = getopt(argc, argv, "hf:k:s:")) > 0) {
 		switch (ch) {
 		case 'h':
 			usage(argv[0]);
@@ -103,13 +115,27 @@ int main(int argc, char* argv[])
 		case 'f':
 			filepath = optarg;
 			break;
+		case 'k':
+			key = optarg;
+			break;
+		case 's':
+			plain = optarg;
+			break;
 		default:
 			break;
 		}
 	}
+
 	base_test();
+
 	if (!filepath.empty()) {
 		check_file(filepath);
+	}
+
+	if (!plain.empty()) {
+		check_string(key, plain);
+	} else {
+		printf("plain empty!\r\n");
 	}
 
 #if defined(_WIN32) || defined(_WIN64)

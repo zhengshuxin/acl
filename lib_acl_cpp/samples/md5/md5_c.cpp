@@ -132,7 +132,7 @@ void md5_final(unsigned char digest[16], md5_ctx *ctx)
  */
 void md5_transform(uint32_t buf[4], uint32_t const in[16])
 {
-	register uint32_t a, b, c, d;
+	uint32_t a, b, c, d;
 
 	a = buf[0];
 	b = buf[1];

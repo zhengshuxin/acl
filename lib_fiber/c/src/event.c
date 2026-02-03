@@ -134,6 +134,11 @@ EVENT *event_create(int size)
 	ev->epoll_timer = timer_cache_create();
 	ring_init(&ev->epoll_ready);
 #endif
+
+#ifdef HAS_KQUEUE
+	ev->kqueue_timer = timer_cache_create();
+	ring_init(&ev->kqueue_ready);
+#endif
 	return ev;
 }
 
@@ -152,6 +157,10 @@ void event_free(EVENT *ev)
 	timer_cache_free(ev->poll_timer);
 #ifdef	HAS_EPOLL
 	timer_cache_free(ev->epoll_timer);
+#endif
+
+#ifdef	HAS_KQUEUE
+	timer_cache_free(ev->kqueue_timer);
 #endif
 
 	ev->free(ev);
@@ -588,6 +597,10 @@ int event_process(EVENT *ev, int timeout)
 
 #ifdef	HAS_EPOLL
 	wakeup_epoll_waiters(ev);
+#endif
+
+#ifdef	HAS_KQUEUE
+	wakeup_kqueue_waiters(ev);
 #endif
 
 	return ret;

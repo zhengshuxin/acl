@@ -118,6 +118,14 @@ static epoll_ctl_fn       __sys_epoll_ctl          = NULL;
 epoll_ctl_fn              *sys_epoll_ctl           = NULL;
 # endif
 
+# ifdef HAS_KQUEUE
+static kqueue_fn          __sys_kqueue             = NULL;
+kqueue_fn                 *sys_kqueue              = NULL;
+
+static kevent_fn          __sys_kevent             = NULL;
+kevent_fn                 *sys_kevent              = NULL;
+# endif
+
 # ifdef HAS_IO_URING
 static openat_fn          __sys_openat             = NULL;
 openat_fn                 *sys_openat              = NULL;
@@ -306,6 +314,12 @@ static void hook_api(void)
 
 	LOAD_FN("epoll_ctl", epoll_ctl_fn, __sys_epoll_ctl, sys_epoll_ctl, 1);
 # endif // HAS_EPOLL
+
+# ifdef	HAS_KQUEUE
+	LOAD_FN("kqueue", kqueue_fn, __sys_kqueue, sys_kqueue, 1);
+
+	LOAD_FN("kevent", kevent_fn, __sys_kevent, sys_kevent, 1);
+# endif // HAS_KQUEUE
 
 # ifdef	HAS_IO_URING
 	LOAD_FN("openat", openat_fn, __sys_openat, sys_openat, 1);

@@ -8,6 +8,8 @@
 # include <libc/sock/epoll.h>
 #elif defined(__linux__) || defined(LINUX2)
 # include <sys/epoll.h>
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+# include <sys/event.h>
 #endif
 
 #ifdef __cplusplus
@@ -83,6 +85,12 @@ typedef int (*select_fn)(int, fd_set *, fd_set *, fd_set *, struct timeval *);
 typedef int (*epoll_create_fn)(int);
 typedef int (*epoll_wait_fn)(int, struct epoll_event *,int, int);
 typedef int (*epoll_ctl_fn)(int, int, int, struct epoll_event *);
+# endif
+
+# ifdef	HAS_KQUEUE
+typedef int (*kqueue_fn)(void);
+typedef int (*kevent_fn)(int, const struct kevent *, int, struct kevent *,
+	int, const struct timespec *);
 # endif
 
 # ifdef HAS_IO_URING
@@ -191,6 +199,11 @@ extern epoll_wait_fn        *sys_epoll_wait;
 extern epoll_ctl_fn         *sys_epoll_ctl;
 # endif
 
+# ifdef	HAS_KQUEUE
+extern kqueue_fn            *sys_kqueue;
+extern kevent_fn            *sys_kevent;
+# endif
+
 # ifdef HAS_IO_URING
 extern openat_fn            *sys_openat;
 extern unlink_fn            *sys_unlink;
@@ -220,6 +233,12 @@ void hook_once(void);
 // in epoll.c
 int epoll_try_register(int epfd);
 int epoll_close(int epfd);
+#endif
+
+#if defined(__APPLE__) || defined(__FreeBSD__)
+// in kqueue.c
+int kqueue_try_register(int kqfd);
+int kqueue_close(int kqfd);
 #endif
 
 #ifdef __cplusplus

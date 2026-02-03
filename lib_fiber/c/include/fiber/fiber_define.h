@@ -28,11 +28,12 @@ enum {
 	FIBER_WAIT_WRITE	= (1 << 2),
 	FIBER_WAIT_POLL		= (1 << 3),
 	FIBER_WAIT_EPOLL	= (1 << 4),
-	FIBER_WAIT_MUTEX	= (1 << 5),
-	FIBER_WAIT_COND		= (1 << 6),
-	FIBER_WAIT_LOCK		= (1 << 7),
-	FIBER_WAIT_SEM		= (1 << 8),
-	FIBER_WAIT_DELAY	= (1 << 9),
+	FIBER_WAIT_KQUEUE	= (1 << 5),
+	FIBER_WAIT_MUTEX	= (1 << 6),
+	FIBER_WAIT_COND		= (1 << 7),
+	FIBER_WAIT_LOCK		= (1 << 8),
+	FIBER_WAIT_SEM		= (1 << 9),
+	FIBER_WAIT_DELAY	= (1 << 10),
 };
 
 #if defined(_WIN32) || defined (_WIN64)

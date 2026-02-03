@@ -73,6 +73,12 @@ typedef struct EPOLL_CTX    EPOLL_CTX;
 typedef struct EPOLL_EVENT  EPOLL_EVENT;
 #endif
 
+#ifdef HAS_KQUEUE
+typedef struct KQUEUE       KQUEUE;
+typedef struct KQUEUE_CTX   KQUEUE_CTX;
+typedef struct KQUEUE_EVENT KQUEUE_EVENT;
+#endif
+
 typedef int  event_oper(EVENT *ev, FILE_EVENT *fe);
 typedef void event_proc(EVENT *ev, FILE_EVENT *fe);
 
@@ -82,6 +88,10 @@ typedef void poll_proc(EVENT *ev, POLL_EVENT *pe);
 
 #ifdef HAS_EPOLL
 typedef void epoll_proc(EVENT *ev, EPOLL_EVENT *ee);
+#endif
+
+#ifdef HAS_KQUEUE
+typedef void kqueue_proc(EVENT *ev, KQUEUE_EVENT *ke);
 #endif
 
 #ifdef HAS_IOCP
@@ -232,6 +242,10 @@ struct FILE_EVENT {
 #endif
 #ifdef HAS_EPOLL
 	EPOLL_CTX    *epx;
+#endif
+
+#ifdef HAS_KQUEUE
+	KQUEUE_CTX   *kqx;
 #endif
 
 #ifdef HAS_IO_URING
@@ -403,6 +417,11 @@ struct EVENT {
 	RING   epoll_ready;
 #endif
 
+#ifdef HAS_KQUEUE
+	TIMER_CACHE *kqueue_timer;
+	RING   kqueue_ready;
+#endif
+
 	unsigned waiter;
 
 	const char *(*name)(void);
@@ -466,6 +485,11 @@ void wakeup_poll_waiters(EVENT *ev);
 /* hook/epoll.c */
 #ifdef HAS_EPOLL
 void wakeup_epoll_waiters(EVENT *ev);
+#endif
+
+/* hook/kqueue.c */
+#ifdef HAS_KQUEUE
+void wakeup_kqueue_waiters(EVENT *ev);
 #endif
 
 #endif
