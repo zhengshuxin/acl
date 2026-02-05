@@ -22,7 +22,10 @@ struct KQUEUE_CTX {
 	KQUEUE *kq;		// Refer to the KQUEUE with the kqfd.
 	uintptr_t ident;	// Same as kevent's ident (fd).
 	short filter;		// EVFILT_READ or EVFILT_WRITE.
-	void *udata;		// User data (same as kevent's udata).
+	void *udata_read;	// User data for EVFILT_READ.
+	void *udata_write;	// User data for EVFILT_WRITE.
+	short flags_read;	// Saved flags for EVFILT_READ.
+	short flags_write;	// Saved flags for EVFILT_WRITE.
 };
 
 struct KQUEUE_EVENT {
@@ -64,13 +67,9 @@ static ARRAY     *__main_kqfds = NULL;
 
 static KQUEUE *kqueue_alloc(int kqfd);
 static void kqueue_free(KQUEUE *kq);
+static void kqueue_ctl_del(EVENT *ev, KQUEUE *kq, int fd, short filter);
 
 /****************************************************************************/
-
-void acl_fiber_share_kqueue(int yes)
-{
-	(void) yes;
-}
 
 // Maybe called by the fcntl API being hooked.
 int kqueue_try_register(int kqfd)
@@ -122,6 +121,27 @@ int kqueue_try_register(int kqfd)
 static void kqueue_event_free(KQUEUE_EVENT *ke)
 {
 	mem_free(ke);
+}
+
+static short kqueue_filter_flags(short flags)
+{
+	short out = 0;
+#ifdef EV_ONESHOT
+	if (flags & EV_ONESHOT) {
+		out |= EV_ONESHOT;
+	}
+#endif
+#ifdef EV_CLEAR
+	if (flags & EV_CLEAR) {
+		out |= EV_CLEAR;
+	}
+#endif
+#ifdef EV_DISPATCH
+	if (flags & EV_DISPATCH) {
+		out |= EV_DISPATCH;
+	}
+#endif
+	return out;
 }
 
 static KQUEUE_EVENT *kqueue_event_alloc(void)
@@ -384,6 +404,7 @@ static void read_callback(EVENT *ev, FILE_EVENT *fe)
 	KQUEUE_EVENT *ke;
 	KQUEUE *kq;
 	RING *r;
+	short flags;
 
 	assert(kqx);
 	assert(kqx->fd == fe->fd);
@@ -410,27 +431,13 @@ static void read_callback(EVENT *ev, FILE_EVENT *fe)
 
 	assert(kq->fds[kqx->fd] == kqx);
 
-	// Check if this event already exists (e.g., both READ and WRITE)
-	int found = 0;
-	int i;
-	for (i = 0; i < ke->nready; i++) {
-		if (ke->events[i].ident == kqx->ident &&
-		    ke->events[i].filter == EVFILT_READ) {
-			found = 1;
-			break;
-		}
-	}
+	// Avoid duplicate events for the same filter in a single wait.
+	if (!(kqx->rmask & EVENT_READ)) {
+		flags = kqx->flags_read;
+		EV_SET(&ke->events[ke->nready], kqx->ident, EVFILT_READ,
+			flags, 0, 0, kqx->udata_read);
 
-	if (!found) {
-		// Save the fd IO event's result to the result receiver been set in
-		// kevent() as below.
-		if ((ev->flag & EVENT_F_USE_ONCE) != 0 && !(fe->mask & EVENT_ONCE)) {
-			EV_SET(&ke->events[ke->nready], kqx->ident, EVFILT_READ,
-				EV_ADD | EV_ENABLE, 0, 0, kqx->udata);
-		} else {
-			EV_SET(&ke->events[ke->nready], kqx->ident, EVFILT_READ,
-				EV_ADD | EV_ENABLE, 0, 0, kqx->udata);
-		}
+		kqx->rmask |= EVENT_READ;
 
 		// Remove the kqueue timer when the first event arriving.
 		if (ke->nready == 0) {
@@ -438,21 +445,14 @@ static void read_callback(EVENT *ev, FILE_EVENT *fe)
 			ring_prepend(&ev->kqueue_ready, &ke->me);
 		}
 
-		// Check if we need to increment nready (only if WRITE is not already set)
-		int has_write = 0;
-		for (i = 0; i < ke->nready; i++) {
-			if (ke->events[i].ident == kqx->ident &&
-			    ke->events[i].filter == EVFILT_WRITE) {
-				has_write = 1;
-				break;
-			}
-		}
-		if (!has_write) {
-			ke->nready++;
-		}
+		ke->nready++;
 	}
 
 	SET_READABLE(fe);
+
+	if ((kqx->flags_read & EV_ONESHOT) != 0) {
+		kqueue_ctl_del(ev, kqx->kq, kqx->fd, EVFILT_READ);
+	}
 }
 
 static void write_callback(EVENT *ev fiber_unused, FILE_EVENT *fe)
@@ -461,6 +461,7 @@ static void write_callback(EVENT *ev fiber_unused, FILE_EVENT *fe)
 	KQUEUE_EVENT *ke;
 	KQUEUE *kq;
 	RING  *r;
+	short flags;
 
 	assert(kqx);
 	assert(kqx->fd == fe->fd);
@@ -483,27 +484,13 @@ static void write_callback(EVENT *ev fiber_unused, FILE_EVENT *fe)
 
 	assert(kq->fds[kqx->fd] == kqx);
 
-	// Check if this event already exists (e.g., both READ and WRITE)
-	int found = 0;
-	int i;
-	for (i = 0; i < ke->nready; i++) {
-		if (ke->events[i].ident == kqx->ident &&
-		    ke->events[i].filter == EVFILT_WRITE) {
-			found = 1;
-			break;
-		}
-	}
+	// Avoid duplicate events for the same filter in a single wait.
+	if (!(kqx->rmask & EVENT_WRITE)) {
+		flags = kqx->flags_write;
+		EV_SET(&ke->events[ke->nready], kqx->ident, EVFILT_WRITE,
+			flags, 0, 0, kqx->udata_write);
 
-	if (!found) {
-		// Save the fd IO event's result to the result receiver been set in
-		// kevent() as below.
-		if ((ev->flag & EVENT_F_USE_ONCE) != 0 && !(fe->mask & EVENT_ONCE)) {
-			EV_SET(&ke->events[ke->nready], kqx->ident, EVFILT_WRITE,
-				EV_ADD | EV_ENABLE, 0, 0, kqx->udata);
-		} else {
-			EV_SET(&ke->events[ke->nready], kqx->ident, EVFILT_WRITE,
-				EV_ADD | EV_ENABLE, 0, 0, kqx->udata);
-		}
+		kqx->rmask |= EVENT_WRITE;
 
 		// Remove the kqueue timer when the first event arriving.
 		if (ke->nready == 0) {
@@ -511,57 +498,60 @@ static void write_callback(EVENT *ev fiber_unused, FILE_EVENT *fe)
 			ring_prepend(&ev->kqueue_ready, &ke->me);
 		}
 
-		// Check if we need to increment nready (only if READ is not already set)
-		int has_read = 0;
-		for (i = 0; i < ke->nready; i++) {
-			if (ke->events[i].ident == kqx->ident &&
-			    ke->events[i].filter == EVFILT_READ) {
-				has_read = 1;
-				break;
-			}
-		}
-		if (!has_read) {
-			ke->nready++;
-		}
+		ke->nready++;
 	}
 
 	SET_WRITABLE(fe);
+
+	if ((kqx->flags_write & EV_ONESHOT) != 0) {
+		kqueue_ctl_del(ev, kqx->kq, kqx->fd, EVFILT_WRITE);
+	}
 }
 
 static void kqueue_ctl_add(EVENT *ev, KQUEUE *kq,
 	const struct kevent *kev, int fd)
 {
 	KQUEUE_CTX *kqx = kq->fds[fd];
+	int existed_read;
+	int existed_write;
 
 	if (kqx == NULL) {
 		kqx = kq->fds[fd] = (KQUEUE_CTX *) mem_malloc(sizeof(KQUEUE_CTX));
+		memset(kqx, 0, sizeof(KQUEUE_CTX));
+		kqx->fd     = fd;
+		kqx->mask   = EVENT_NONE;
+		kqx->rmask  = EVENT_NONE;
+		kqx->kq     = kq;
 	}
 
-	kqx->fd     = fd;
-	kqx->mask   = EVENT_NONE;
-	kqx->rmask  = EVENT_NONE;
-	kqx->kq     = kq;
-	kqx->ident  = kev->ident;
-	kqx->udata  = kev->udata;
+	kqx->ident = kev->ident;
+	existed_read = (kqx->mask & EVENT_READ) ? 1 : 0;
+	existed_write = (kqx->mask & EVENT_WRITE) ? 1 : 0;
 
 	if (kev->filter == EVFILT_READ) {
+		kqx->udata_read = kev->udata;
+		kqx->flags_read = kqueue_filter_flags(kev->flags);
 		kqx->mask   |= EVENT_READ;
 		kqx->filter  = EVFILT_READ;
-		kqx->fe      = fiber_file_open(fd);
-		kqx->fe->kqx = kqx;
-
-		event_add_read(ev, kqx->fe, read_callback);
-		SET_READWAIT(kqx->fe);
+		if (!existed_read || kqx->fe == NULL) {
+			kqx->fe = fiber_file_open(fd);
+			kqx->fe->kqx = kqx;
+			event_add_read(ev, kqx->fe, read_callback);
+			SET_READWAIT(kqx->fe);
+		}
 	}
 
 	if (kev->filter == EVFILT_WRITE) {
+		kqx->udata_write = kev->udata;
+		kqx->flags_write = kqueue_filter_flags(kev->flags);
 		kqx->mask   |= EVENT_WRITE;
 		kqx->filter  = EVFILT_WRITE;
-		kqx->fe      = fiber_file_open(fd);
-		kqx->fe->kqx = kqx;
-
-		event_add_write(ev, kqx->fe, write_callback);
-		SET_WRITEWAIT(kqx->fe);
+		if (!existed_write || kqx->fe == NULL) {
+			kqx->fe = fiber_file_open(fd);
+			kqx->fe->kqx = kqx;
+			event_add_write(ev, kqx->fe, write_callback);
+			SET_WRITEWAIT(kqx->fe);
+		}
 	}
 }
 
@@ -577,6 +567,9 @@ static void kqueue_ctl_del(EVENT *ev, KQUEUE *kq, int fd, short filter)
 		event_del_read(ev, kqx->fe, 1);
 		CLR_READWAIT(kqx->fe);
 		kqx->mask &= ~EVENT_READ;
+		kqx->rmask &= ~EVENT_READ;
+		kqx->udata_read = NULL;
+		kqx->flags_read = 0;
 	}
 
 	if (filter == EVFILT_WRITE && (kqx->mask & EVENT_WRITE)) {
@@ -584,6 +577,9 @@ static void kqueue_ctl_del(EVENT *ev, KQUEUE *kq, int fd, short filter)
 		event_del_write(ev, kqx->fe, 1);
 		CLR_WRITEWAIT(kqx->fe);
 		kqx->mask &= ~EVENT_WRITE;
+		kqx->rmask &= ~EVENT_WRITE;
+		kqx->udata_write = NULL;
+		kqx->flags_write = 0;
 	}
 
 	if (kqx->mask == EVENT_NONE) {
@@ -597,7 +593,8 @@ static void kqueue_ctl_del(EVENT *ev, KQUEUE *kq, int fd, short filter)
 		kqx->fe      = NULL;
 		kqx->kq      = NULL;
 		memset(&kqx->ident, 0, sizeof(kqx->ident));
-		memset(&kqx->udata, 0, sizeof(kqx->udata));
+		memset(&kqx->udata_read, 0, sizeof(kqx->udata_read));
+		memset(&kqx->udata_write, 0, sizeof(kqx->udata_write));
 		mem_free(kqx);
 	}
 }
@@ -692,7 +689,7 @@ int kevent(int kq, const struct kevent *changelist, int nchanges,
 	}
 
 	// Handle eventlist (wait for events) - similar to epoll_wait
-	if (nevents > 0 && eventlist != NULL && timeout != NULL) {
+	if (nevents > 0 && eventlist != NULL) {
 		KQUEUE_EVENT *ke;
 		long long now;
 		int timeout_ms;
@@ -705,7 +702,9 @@ int kevent(int kq, const struct kevent *changelist, int nchanges,
 		ke->nready    = 0;
 
 		// Convert timespec to milliseconds
-		if (timeout->tv_sec < 0) {
+		if (timeout == NULL) {
+			timeout_ms = -1;
+		} else if (timeout->tv_sec < 0) {
 			timeout_ms = -1;
 		} else {
 			timeout_ms = timeout->tv_sec * 1000 + timeout->tv_nsec / 1000000;
@@ -761,6 +760,22 @@ int kevent(int kq, const struct kevent *changelist, int nchanges,
 			if (ke->expire > 0 && now >= ke->expire) {
 				acl_fiber_set_error(FIBER_ETIME);
 				break;
+			}
+		}
+
+		if (ke->nready > 0) {
+			for (i = 0; i < ke->nready; i++) {
+				int fd = (int) ke->events[i].ident;
+				KQUEUE_CTX *kqx = (fd >= 0 && fd < (int) kq_obj->nfds)
+					? kq_obj->fds[fd] : NULL;
+				if (kqx == NULL) {
+					continue;
+				}
+				if (ke->events[i].filter == EVFILT_READ) {
+					kqx->rmask &= ~EVENT_READ;
+				} else if (ke->events[i].filter == EVFILT_WRITE) {
+					kqx->rmask &= ~EVENT_WRITE;
+				}
 			}
 		}
 

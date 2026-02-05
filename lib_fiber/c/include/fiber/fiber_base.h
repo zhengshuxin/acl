@@ -451,15 +451,6 @@ FIBER_API void acl_fiber_memstat(void);
 FIBER_API void acl_fiber_share_epoll(int yes);
 #endif
 
-#if defined(__APPLE__) || defined(__FreeBSD__)
-/**
- * If multiple fibers of the same thread can share one kqueue handle when
- * using kqueue, default is no.
- * @param yes {int}
- */
-FIBER_API void acl_fiber_share_kqueue(int yes);
-#endif
-
 /****************************************************************************/
 
 #ifdef __cplusplus

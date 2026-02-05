@@ -309,15 +309,12 @@ static void hook_api(void)
 
 # ifdef	HAS_EPOLL
 	LOAD_FN("epoll_create", epoll_create_fn, __sys_epoll_create, sys_epoll_create, 1);
-
 	LOAD_FN("epoll_wait", epoll_wait_fn, __sys_epoll_wait, sys_epoll_wait, 1);
-
 	LOAD_FN("epoll_ctl", epoll_ctl_fn, __sys_epoll_ctl, sys_epoll_ctl, 1);
 # endif // HAS_EPOLL
 
 # ifdef	HAS_KQUEUE
 	LOAD_FN("kqueue", kqueue_fn, __sys_kqueue, sys_kqueue, 1);
-
 	LOAD_FN("kevent", kevent_fn, __sys_kevent, sys_kevent, 1);
 # endif // HAS_KQUEUE
 
