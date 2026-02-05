@@ -89,6 +89,12 @@ int WINAPI acl_fiber_close(socket_t fd)
 	 */
 	if (epoll_close(fd) == 0) {
 		return 0;
+	} 
+#endif
+
+#ifdef	HAS_KQUEUE
+	if (kqueue_close(fd) == 0) {
+		return 0;
 	}
 #endif
 

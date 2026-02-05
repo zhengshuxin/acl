@@ -281,6 +281,7 @@ int kqueue_close(int kqfd)
 	KQUEUE *kq = NULL;
 	int pos = -1;
 	ITER iter;
+	size_t i;
 
 	if (__kqfds == NULL || kqfd < 0) {
 		return -1;
@@ -314,6 +315,20 @@ int kqueue_close(int kqfd)
 		msg_error("%s(%d): can't close the event sys_kqfd=%d",
 			__FUNCTION__, __LINE__, kqfd);
 		return -1;
+	}
+
+	for (i = 0; i < kq->nfds; i++) {
+		KQUEUE_CTX *kqx = kq->fds[i];
+		if (kqx == NULL) {
+			continue;
+		}
+		if (kqx->mask & EVENT_READ) {
+			kqueue_ctl_del(ev, kq, (int) i, EVFILT_READ);
+		}
+		kqx = kq->fds[i];
+		if (kqx && (kqx->mask & EVENT_WRITE)) {
+			kqueue_ctl_del(ev, kq, (int) i, EVFILT_WRITE);
+		}
 	}
 
 	kqueue_free(kq);
@@ -412,7 +427,6 @@ static void read_callback(EVENT *ev, FILE_EVENT *fe)
 
 	r = ring_succ(&kq->kes);
 	if (r == &kq->kes) {
-		msg_error("%s(%d): kq->kes empty", __FUNCTION__, __LINE__);
 		return;
 	}
 
@@ -423,6 +437,7 @@ static void read_callback(EVENT *ev, FILE_EVENT *fe)
 	// ready fds kept in system buffer, and hope they'll be handled in the
 	// next kevent().
 	if (ke->nready >= ke->nevents) {
+		msg_error("%s(%d): kq->kes empty", __FUNCTION__, __LINE__);
 		return;
 	}
 
