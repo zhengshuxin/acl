@@ -372,6 +372,22 @@ struct FILE_EVENT {
 #define	EVENT_BUSY_WRITE	(1 << 1)
 };
 
+#ifdef HAS_KQUEUE
+struct KQUEUE_CTX {
+	int  fd;		// The socket fd.
+	int  mask;		// The event mask been set (EVENT_READ | EVENT_WRITE).
+	int  rmask;		// The result event mask.
+	FILE_EVENT *fe;		// Refer to the FILE_EVENT with the socket fd.
+	KQUEUE *kq;		// Refer to the KQUEUE with the kqfd.
+	uintptr_t ident;	// Same as kevent's ident (fd).
+	short filter;		// EVFILT_READ or EVFILT_WRITE.
+	void *udata_read;	// User data for EVFILT_READ.
+	void *udata_write;	// User data for EVFILT_WRITE.
+	short flags_read;	// Saved flags for EVFILT_READ.
+	short flags_write;	// Saved flags for EVFILT_WRITE.
+};
+#endif
+
 #ifdef HAS_POLL
 struct POLL_EVENT {
 	RING       me;
@@ -490,6 +506,8 @@ void wakeup_epoll_waiters(EVENT *ev);
 /* hook/kqueue.c */
 #ifdef HAS_KQUEUE
 void wakeup_kqueue_waiters(EVENT *ev);
+void kqueue_rearm_read(FILE_EVENT *fe);
+void kqueue_rearm_write(FILE_EVENT *fe);
 #endif
 
 #endif

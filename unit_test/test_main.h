@@ -6,6 +6,7 @@
 #include "stdlib/test_stdlib.h"
 #include "unit_test/unit_test.h"
 #include "net/test_net.h"
+#include "fiber/test_fiber.h"
 
 typedef struct {
 	const char *label;
@@ -16,6 +17,7 @@ static TEST_ENTRY __test_entry_tab[] = {
 	{ "test_stdlib",	test_stdlib_register	},
 	{ "test_unit",		test_unit_register	},
 	{ "test_net",		test_net_register	},
+	{ "test_fiber",		test_fiber_register	},
 	{ NULL, NULL },
 };
 

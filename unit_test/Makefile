@@ -84,9 +84,19 @@ ACL_HOME     = ../lib_acl
 ACL_INC_PATH = $(ACL_HOME)/include
 ACL_LIB_PATH = $(ACL_HOME)/lib
 
-CFLAGS += -I$(ACL_INC_PATH)
+FIBER_HOME     = ../lib_fiber
+FIBER_INC_PATH = $(FIBER_HOME)/c/include
+FIBER_LIB_PATH = $(FIBER_HOME)/lib
 
-LINK_LIBS = -L$(ACL_LIB_PATH) -lacl $(SYSLIB)
+PRO_HOME     = ../lib_protocol
+PRO_LIB_PATH = $(PRO_HOME)/lib
+
+CFLAGS += -I$(ACL_INC_PATH) -I$(FIBER_INC_PATH)
+
+LINK_LIBS = -L$(ACL_LIB_PATH) -lacl \
+	-L$(PRO_LIB_PATH) -l_protocol \
+	-L$(FIBER_LIB_PATH) -l_fiber \
+	$(SYSLIB)
 
 ###########################################################
 OUT_PATH = .
@@ -96,7 +106,7 @@ PROG_PATH_DST = $(OUT_PATH)/bin
 BASE_PATH  = .
 SRC_PATH_SRC = $(BASE_PATH)
 
-INC_COMPILE  = -I. -I./stdlib -I./net -I./unit_test
+INC_COMPILE  = -I. -I./stdlib -I./net -I./unit_test -I./fiber
 CFLAGS += $(INC_COMPILE)
 
 #Project's source
@@ -104,7 +114,8 @@ BASE_SRC        = $(wildcard *.c)
 STDLIB_SRC	= $(wildcard $(SRC_PATH_SRC)/stdlib/*.c)
 UNIT_TEST_SRC	= $(wildcard $(SRC_PATH_SRC)/unit_test/*.c)
 NET_SRC		= $(wildcard $(SRC_PATH_SRC)/net/*.c)
-SOURCES_SRC	= $(BASE_SRC) $(STDLIB_SRC) $(UNIT_TEST_SRC) $(NET_SRC)
+FIBER_SRC	= $(wildcard $(SRC_PATH_SRC)/fiber/*.c)
+SOURCES_SRC	= $(BASE_SRC) $(STDLIB_SRC) $(UNIT_TEST_SRC) $(NET_SRC) $(FIBER_SRC)
 
 #Project's obj
 OBJS_DST        = $(patsubst %.c, $(OBJ_PATH_DST)/%.o, $(notdir $(SOURCES_SRC)))
@@ -134,6 +145,9 @@ $(OBJ_PATH_DST)/%.o: unit_test/%.c unit_test/*.h
 $(OBJ_PATH_DST)/%.o: net/%.c net/*.h
 	$(COMPILE) $< -o $@
 
+$(OBJ_PATH_DST)/%.o: fiber/%.c fiber/*.h
+	$(COMPILE) $< -o $@
+
 clean:
 	rm -f $(PROG_PATH_DST)/$(PROG_NAME)
 	rm -f $(OBJS_DST)
@@ -144,5 +158,4 @@ myecho:
 	@(echo "SOURCES_SRC: $(SOURCES_SRC)")
 	@(echo "OBJS_DST: $(OBJS_DST)")
 	@(echo "OBJ_PATH_DST: $(OBJ_PATH_DST)")
-
 

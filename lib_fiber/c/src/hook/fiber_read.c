@@ -5,6 +5,16 @@
 #include "hook.h"  // Must before "io.h" for the defined HAS_MMSG
 #include "io.h"
 
+#if defined(HAS_KQUEUE)
+#define KQUEUE_REARM_READ_IF_NEEDED(_fe, _n) do {                             \
+    if (var_hook_sys_api && (_n) > 0 && (_fe) && (_fe)->kqx) {                \
+        kqueue_rearm_read((_fe));                                             \
+    }                                                                         \
+} while (0)
+#else
+#define KQUEUE_REARM_READ_IF_NEEDED(_fe, _n) do {} while (0)
+#endif
+
 #if defined(HAS_IO_URING)
 
 static int uring_wait_read(FILE_EVENT *fe)
@@ -194,6 +204,7 @@ int fiber_iocp_read(FILE_EVENT *fe, char *buf, int len)
     }                                                                        \
     ret = (*_fn)((_fe)->fd, ##_args);                                        \
     if (ret > 0) {                                                           \
+        KQUEUE_REARM_READ_IF_NEEDED((_fe), ret);                             \
         if (((_fe)->type & TYPE_KEEPIO) != 0) {                              \
             SET_READING((_fe));                                              \
         }                                                                    \

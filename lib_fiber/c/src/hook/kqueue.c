@@ -11,23 +11,6 @@
 
 /****************************************************************************/
 
-/**
- * One socket fd has one KQUEUE_CTX in kqueue mode which was set in FILE_EVENT.
- */
-struct KQUEUE_CTX {
-	int  fd;		// The socket fd.
-	int  mask;		// The event mask been set (EVENT_READ | EVENT_WRITE).
-	int  rmask;		// The result event mask.
-	FILE_EVENT *fe;		// Refer to the FILE_EVENT with the socket fd.
-	KQUEUE *kq;		// Refer to the KQUEUE with the kqfd.
-	uintptr_t ident;	// Same as kevent's ident (fd).
-	short filter;		// EVFILT_READ or EVFILT_WRITE.
-	void *udata_read;	// User data for EVFILT_READ.
-	void *udata_write;	// User data for EVFILT_WRITE.
-	short flags_read;	// Saved flags for EVFILT_READ.
-	short flags_write;	// Saved flags for EVFILT_WRITE.
-};
-
 struct KQUEUE_EVENT {
 	RING        me;
 	RING        me4kq;
@@ -452,6 +435,16 @@ static void read_callback(EVENT *ev, FILE_EVENT *fe)
 
 	if ((kqx->flags_read & EV_ONESHOT) != 0) {
 		kqueue_ctl_del(ev, kqx->kq, kqx->fd, EVFILT_READ);
+#ifdef EV_CLEAR
+	} else if ((kqx->flags_read & EV_CLEAR) != 0) {
+		event_del_read(ev, kqx->fe, 1);
+		CLR_READWAIT(kqx->fe);
+#endif
+#ifdef EV_DISPATCH
+	} else if ((kqx->flags_read & EV_DISPATCH) != 0) {
+		event_del_read(ev, kqx->fe, 1);
+		CLR_READWAIT(kqx->fe);
+#endif
 	}
 }
 
@@ -505,6 +498,16 @@ static void write_callback(EVENT *ev fiber_unused, FILE_EVENT *fe)
 
 	if ((kqx->flags_write & EV_ONESHOT) != 0) {
 		kqueue_ctl_del(ev, kqx->kq, kqx->fd, EVFILT_WRITE);
+#ifdef EV_CLEAR
+	} else if ((kqx->flags_write & EV_CLEAR) != 0) {
+		event_del_write(ev, kqx->fe, 1);
+		CLR_WRITEWAIT(kqx->fe);
+#endif
+#ifdef EV_DISPATCH
+	} else if ((kqx->flags_write & EV_DISPATCH) != 0) {
+		event_del_write(ev, kqx->fe, 1);
+		CLR_WRITEWAIT(kqx->fe);
+#endif
 	}
 }
 
@@ -539,9 +542,7 @@ static void kqueue_ctl_add(EVENT *ev, KQUEUE *kq,
 			event_add_read(ev, kqx->fe, read_callback);
 			SET_READWAIT(kqx->fe);
 		}
-	}
-
-	if (kev->filter == EVFILT_WRITE) {
+	} else if (kev->filter == EVFILT_WRITE) {
 		kqx->udata_write = kev->udata;
 		kqx->flags_write = kqueue_filter_flags(kev->flags);
 		kqx->mask   |= EVENT_WRITE;
@@ -570,9 +571,7 @@ static void kqueue_ctl_del(EVENT *ev, KQUEUE *kq, int fd, short filter)
 		kqx->rmask &= ~EVENT_READ;
 		kqx->udata_read = NULL;
 		kqx->flags_read = 0;
-	}
-
-	if (filter == EVFILT_WRITE && (kqx->mask & EVENT_WRITE)) {
+	} else if (filter == EVFILT_WRITE && (kqx->mask & EVENT_WRITE)) {
 		assert(kqx->fe);
 		event_del_write(ev, kqx->fe, 1);
 		CLR_WRITEWAIT(kqx->fe);
@@ -583,7 +582,7 @@ static void kqueue_ctl_del(EVENT *ev, KQUEUE *kq, int fd, short filter)
 	}
 
 	if (kqx->mask == EVENT_NONE) {
-		kq->fds[fd] = NULL;
+		kq->fds[fd]  = NULL;
 		kqx->fd      = -1;
 		kqx->mask    = EVENT_NONE;
 		kqx->rmask   = EVENT_NONE;
@@ -660,8 +659,7 @@ int kevent(int kq, const struct kevent *changelist, int nchanges,
 						event_add_read(ev, kqx->fe, read_callback);
 						SET_READWAIT(kqx->fe);
 					}
-				}
-				if (kev->filter == EVFILT_WRITE) {
+				} else if (kev->filter == EVFILT_WRITE) {
 					KQUEUE_CTX *kqx = kq_obj->fds[fd];
 					if (kqx && (kqx->mask & EVENT_WRITE)) {
 						event_add_write(ev, kqx->fe, write_callback);
@@ -676,8 +674,7 @@ int kevent(int kq, const struct kevent *changelist, int nchanges,
 						event_del_read(ev, kqx->fe, 1);
 						CLR_READWAIT(kqx->fe);
 					}
-				}
-				if (kev->filter == EVFILT_WRITE) {
+				} else if (kev->filter == EVFILT_WRITE) {
 					KQUEUE_CTX *kqx = kq_obj->fds[fd];
 					if (kqx && (kqx->mask & EVENT_WRITE)) {
 						event_del_write(ev, kqx->fe, 1);
@@ -787,6 +784,80 @@ int kevent(int kq, const struct kevent *changelist, int nchanges,
 }
 
 #define TO_APPL	ring_to_appl
+
+void kqueue_rearm_read(FILE_EVENT *fe)
+{
+	EVENT *ev;
+	KQUEUE_CTX *kqx;
+
+	if (!var_hook_sys_api || fe == NULL) {
+		return;
+	}
+
+	kqx = fe->kqx;
+#ifdef EV_CLEAR
+	if (kqx == NULL || !(kqx->flags_read & EV_CLEAR)) {
+		return;
+	}
+#else
+	(void) kqx;
+	return;
+#endif
+
+	if (!(kqx->mask & EVENT_READ)) {
+		return;
+	}
+
+	if (IS_READWAIT(fe)) {
+		return;
+	}
+
+	ev = fiber_io_event();
+	if (ev == NULL) {
+		return;
+	}
+
+	kqx->rmask &= ~EVENT_READ;
+	event_add_read(ev, fe, read_callback);
+	SET_READWAIT(fe);
+}
+
+void kqueue_rearm_write(FILE_EVENT *fe)
+{
+	EVENT *ev;
+	KQUEUE_CTX *kqx;
+
+	if (!var_hook_sys_api || fe == NULL) {
+		return;
+	}
+
+	kqx = fe->kqx;
+#ifdef EV_CLEAR
+	if (kqx == NULL || !(kqx->flags_write & EV_CLEAR)) {
+		return;
+	}
+#else
+	(void) kqx;
+	return;
+#endif
+
+	if (!(kqx->mask & EVENT_WRITE)) {
+		return;
+	}
+
+	if (IS_WRITEWAIT(fe)) {
+		return;
+	}
+
+	ev = fiber_io_event();
+	if (ev == NULL) {
+		return;
+	}
+
+	kqx->rmask &= ~EVENT_WRITE;
+	event_add_write(ev, fe, write_callback);
+	SET_WRITEWAIT(fe);
+}
 
 void wakeup_kqueue_waiters(EVENT *ev)
 {

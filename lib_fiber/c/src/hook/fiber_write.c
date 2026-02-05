@@ -5,6 +5,16 @@
 #include "hook.h"
 #include "io.h"
 
+#if defined(HAS_KQUEUE)
+#define KQUEUE_REARM_WRITE_IF_NEEDED(_fe, _n) do {                            \
+    if (var_hook_sys_api && (_n) >= 0 && (_fe) && (_fe)->kqx) {               \
+        kqueue_rearm_write((_fe));                                            \
+    }                                                                         \
+} while (0)
+#else
+#define KQUEUE_REARM_WRITE_IF_NEEDED(_fe, _n) do {} while (0)
+#endif
+
 // In the API connect() being hooked in hook/socket.c, the STATUS_NDUBLOCK
 // flag was set and the fd was in non-block status in order to return imaginary
 // from connecting process.
@@ -99,6 +109,7 @@ int fiber_uring_write(FILE_EVENT *fe, const char *buf, int len)
 #define CHECK_WRITE_RESULT(_fe, _n) do {                                     \
     int _err;                                                                \
     if (_n >= 0) {                                                           \
+        KQUEUE_REARM_WRITE_IF_NEEDED((_fe), (_n));                           \
         return _n;                                                           \
     }                                                                        \
     _err = acl_fiber_last_error();                                           \
