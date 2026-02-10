@@ -24,8 +24,16 @@ typedef struct {
 	int          cache_max;
 } FIBER_TLS;
 
-static FIBER_TLS *__main_fiber = NULL;
+static pthread_key_t __fiber_key;
+
+#ifdef THREAD_LOCAL_DYNAMIC
+static FIBER_TLS *thread_fiber();
+#define __thread_fiber thread_fiber()
+#else
 static __thread FIBER_TLS *__thread_fiber = NULL;
+#endif
+
+static FIBER_TLS *__main_fiber = NULL;
 
 static void fiber_io_loop(ACL_FIBER *fiber, void *ctx);
 
@@ -46,9 +54,7 @@ void acl_fiber_schedule_stop(void)
 	((ACL_FIBER *) ((char *) (r) - offsetof(ACL_FIBER, me)))
 
 #define FIRST_FIBER(head) \
-	(ring_succ(head) != (head) ? RING_TO_FIBER(ring_succ(head)) : 0)
-
-static pthread_key_t __fiber_key;
+	(ring_succ(head) != (he	ad) ? RING_TO_FIBER(ring_succ(head)) : 0)
 
 static void free_file(void *arg)
 {
@@ -59,7 +65,6 @@ static void free_file(void *arg)
 static void thread_free(void *ctx)
 {
 	FIBER_TLS *tf = (FIBER_TLS *) ctx;
-
 	if (__thread_fiber == NULL) {
 		return;
 	}
@@ -83,7 +88,12 @@ static void thread_free(void *ctx)
 	if (__main_fiber == __thread_fiber) {
 		__main_fiber = NULL;
 	}
+
+#ifdef THREAD_LOCAL_DYNAMIC
+	pthread_setspecific(__fiber_key, NULL);
+#else
 	__thread_fiber = NULL;
+#endif
 }
 
 static void fiber_io_main_free(void)
@@ -91,9 +101,14 @@ static void fiber_io_main_free(void)
 	if (__main_fiber) {
 		thread_free(__main_fiber);
 		if (__thread_fiber == __main_fiber) {
+#ifndef THREAD_LOCAL_DYNAMIC
 			__thread_fiber = NULL;
+#endif
 		}
 		__main_fiber = NULL;
+#ifdef THREAD_LOCAL_DYNAMIC
+		pthread_setspecific(__fiber_key, NULL);
+#endif
 	}
 }
 
@@ -107,35 +122,47 @@ static void thread_once(void)
 
 static void thread_init(void)
 {
+	FIBER_TLS *local = (FIBER_TLS *) mem_malloc(sizeof(FIBER_TLS));
+
 	var_maxfd = open_limit(0);
 	if (var_maxfd <= 0) {
 		var_maxfd = MAXFD;
 	}
 
-	__thread_fiber = (FIBER_TLS *) mem_malloc(sizeof(FIBER_TLS));
-	__thread_fiber->event = event_create(var_maxfd);
-	__thread_fiber->ev_fiber  = acl_fiber_create(fiber_io_loop,
-			__thread_fiber->event, STACK_SIZE);
-	__thread_fiber->io_stop   = 0;
-	__thread_fiber->ev_timer  = timer_cache_create();
+	local->event     = event_create(var_maxfd);
+	local->ev_fiber  = acl_fiber_create(fiber_io_loop, local->event, STACK_SIZE);
+	local->io_stop   = 0;
+	local->ev_timer  = timer_cache_create();
 
 #ifdef SYS_WIN
-	__thread_fiber->events = htable_create(var_maxfd);
+	local->events    = htable_create(var_maxfd);
 #else
-	__thread_fiber->events = (FILE_EVENT **)
-		mem_calloc(var_maxfd, sizeof(FILE_EVENT*));
+	local->events    = (FILE_EVENT **) mem_calloc(var_maxfd, sizeof(FILE_EVENT*));
 #endif
 
-	__thread_fiber->cache     = array_create(100, ARRAY_F_UNORDER);
-	__thread_fiber->cache_max = 1000;
+	local->cache     = array_create(100, ARRAY_F_UNORDER);
+	local->cache_max = 1000;
 
 	if (thread_self() == main_thread_self()) {
-		__main_fiber = __thread_fiber;
+		__main_fiber = local;
 		atexit(fiber_io_main_free);
-	} else if (pthread_setspecific(__fiber_key, __thread_fiber) != 0) {
+	}
+
+#ifdef THREAD_LOCAL_DYNAMIC
+	if (pthread_setspecific(__fiber_key, local) != 0) {
 		msg_fatal("pthread_setspecific error!\r\n");
 	}
+#else
+	__thread_fiber = local;
+#endif
 }
+
+#ifdef THREAD_LOCAL_DYNAMIC
+static FIBER_TLS *thread_fiber()
+{
+	return (FIBER_TLS*) pthread_getspecific(__fiber_key);
+}
+#endif
 
 static pthread_once_t __once_control = PTHREAD_ONCE_INIT;
 
@@ -269,7 +296,7 @@ static void fiber_io_loop(ACL_FIBER *self fiber_unused, void *ctx)
 		/* Add 1 just for the deviation of epoll_wait */
 		event_process(ev, left > 0 ? (int) left + 1 : (int) left);
 
-		if (__thread_fiber->io_stop) {
+		if (__thread_fiber == NULL || __thread_fiber->io_stop) {
 			msg_info("%s(%d): io_stop set!", __FUNCTION__, __LINE__);
 			break;
 		}
@@ -318,12 +345,14 @@ static void fiber_io_loop(ACL_FIBER *self fiber_unused, void *ctx)
 	// in acl_fiber_schedule() after scheduling finished.
 	// 
 	// __thread_fiber->ev_fiber = NULL;
+	//thread_free(thread_fiber());
 }
 
 void fiber_io_clear(void)
 {
 	if (__thread_fiber) {
 		__thread_fiber->ev_fiber = NULL;
+		//thread_free(__thread_fiber);
 	}
 }
 

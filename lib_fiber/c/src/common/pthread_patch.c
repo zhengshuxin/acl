@@ -30,11 +30,10 @@ void pthread_end(void)
 	static int __thread_ended = 0;
 	int   i;
 
-	tls_value_list_free();
-
 	if (__thread_ended)
 		return;
 
+	tls_value_list_free();
 	__thread_ended = 1;
 	pthread_mutex_destroy(&__thread_lock);
 
@@ -184,7 +183,7 @@ int pthread_setspecific(pthread_key_t key, void *value)
 {
 	const char *myname = "pthread_setspecific";
 	FIFO *tls_value_list_ptr = tls_value_list_get();
-	ITER iter;
+	//ITER iter;
 
 	if (key < 0 || key >= PTHREAD_KEYS_MAX) {
 		msg_error("%s(%d): key(%d) invalid", myname, __LINE__, key);
@@ -196,6 +195,7 @@ int pthread_setspecific(pthread_key_t key, void *value)
 		return EINVAL;
 	}
 
+#if 0
 	foreach(iter, tls_value_list_ptr) {
 		TLS_VALUE *tls_value = (TLS_VALUE*) iter.data;
 		if (tls_value->tls_key != NULL
@@ -209,6 +209,7 @@ int pthread_setspecific(pthread_key_t key, void *value)
 			break;
 		}
 	}
+#endif
 
 	if (TlsSetValue(key, value)) {
 		TLS_VALUE *tls_value = (TLS_VALUE*) mem_malloc(sizeof(TLS_VALUE));

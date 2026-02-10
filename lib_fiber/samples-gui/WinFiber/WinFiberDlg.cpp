@@ -92,6 +92,7 @@ BEGIN_MESSAGE_MAP(CWinFiberDlg, CDialogEx)
 	ON_BN_CLICKED(IDCANCEL, &CWinFiberDlg::OnBnClickedCancel)
 	ON_BN_CLICKED(IDC_AWAIT_DNS, &CWinFiberDlg::OnBnClickedAwaitDns)
 	ON_BN_CLICKED(IDC_RESOLVE, &CWinFiberDlg::OnBnClickedResolve)
+ON_BN_CLICKED(IDC_THREAD, &CWinFiberDlg::OnBnClickedThread)
 END_MESSAGE_MAP()
 
 // CWinFiberDlg 消息处理程序
@@ -187,6 +188,7 @@ void CWinFiberDlg::Uni2Str(const CString& in, acl::string& out)
 void CWinFiberDlg::InitFiber(void)
 {
 	acl::acl_cpp_init();
+	acl::fiber::stdout_open(true);
 	// 设置协程调度的事件引擎，同时将协程调度设为自动启动模式，不能在进程初始化时启动
 	// 协程调试器，必须在界面消息引擎正常运行后才启动协程调度器！
 	acl::fiber::init(acl::FIBER_EVENT_T_WMSG, true);
@@ -489,3 +491,40 @@ void CWinFiberDlg::OnBnClickedResolve()
 		}
 	};
 }
+
+static void thread_run(acl::wait_group& sync)
+{
+		go[] {
+			for (int j = 0; j < 1; j++) {
+				auto fb = go[=] {
+					//printf("thread-%ld, fiber-%d run, (%d)\n",
+					//	(long) GetCurrentThreadId(), acl::fiber::self(), j);
+					acl::fiber::delay(100);
+				};
+				printf("thread-%ld, fiber-%d created\n",
+					(long) GetCurrentThreadId(), fb->get_id());
+			}
+		};
+		acl::fiber::schedule();
+		//sync.done();
+}
+
+void CWinFiberDlg::OnBnClickedThread()
+{
+	// TODO: 在此添加控件通知处理程序代码
+	printf("The main thread: %ld\r\n", (long) GetCurrentThreadId());
+
+	go[] {
+		acl::wait_group sync;
+		//sync.add(1);
+
+		for (int i = 0; i < 1; i++) {
+			std::thread thr([&sync] { thread_run(sync); });
+			thr.detach();
+		}
+
+		//sync.wait();
+		printf("All threas exited, the main thread: %ld\r\n", (long) GetCurrentThreadId());
+	};
+}
+

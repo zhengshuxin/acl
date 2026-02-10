@@ -47,9 +47,15 @@ typedef struct THREAD {
 
 static ATOMIC   *__idgen_atomic = NULL;
 static long long __idgen_value  = 0;
+static pthread_key_t __fiber_key;
 
-static THREAD          *__main_fiber   = NULL;
+#ifdef THREAD_LOCAL_DYNAMIC
+static THREAD *thread_fiber();
+#define __thread_fiber thread_fiber()
+#else
 static __thread THREAD *__thread_fiber = NULL;
+#endif
+static THREAD          *__main_fiber   = NULL;
 static __thread int __scheduled = 0;
 static __thread int __schedule_auto = 0;
 __thread int var_hook_sys_api   = 0;
@@ -58,7 +64,6 @@ __thread int var_hook_sys_api   = 0;
 static size_t __shared_stack_size = 10240000;
 #endif
 
-static pthread_key_t __fiber_key;
 static int __max_cache = MAX_CACHE;
 
 void acl_fiber_set_max_cache(int max)
@@ -116,7 +121,11 @@ static void thread_free(void *ctx)
 		__main_fiber = NULL;
 	}
 
+#ifdef THREAD_LOCAL_DYNAMIC
+	pthread_setspecific(__fiber_key, NULL);
+#else
 	__thread_fiber = NULL;
+#endif
 }
 
 static void fiber_schedule_main_free(void)
@@ -124,9 +133,11 @@ static void fiber_schedule_main_free(void)
 	if (__main_fiber) {
 		thread_free(__main_fiber);
 		if (__thread_fiber == __main_fiber) {
-			__thread_fiber = NULL;
+			__main_fiber = NULL;
 		}
-		__main_fiber = NULL;
+#ifdef THREAD_LOCAL_DYNAMIC
+		pthread_setspecific(__fiber_key, NULL);
+#endif
 	}
 }
 
@@ -151,10 +162,19 @@ static void thread_init(void)
 	atexit(free_atomic_onexit);
 }
 
+#ifdef THREAD_LOCAL_DYNAMIC
+static THREAD *thread_fiber()
+{
+	return (THREAD*) pthread_getspecific(__fiber_key);
+}
+#endif
+
 static pthread_once_t __once_control = PTHREAD_ONCE_INIT;
 
 static void fiber_check(void)
 {
+	THREAD *local;
+
 	if (__thread_fiber != NULL) {
 		return;
 	}
@@ -165,34 +185,40 @@ static void fiber_check(void)
 		abort();
 	}
 
-	__thread_fiber = (THREAD *) mem_calloc(1, sizeof(THREAD));
+	local = (THREAD *) mem_calloc(1, sizeof(THREAD));
 
-	__thread_fiber->original = fiber_real_origin();
-	__thread_fiber->fibers   = NULL;
-	__thread_fiber->size     = 0;
-	__thread_fiber->slot     = 0;
-	__thread_fiber->nlocal   = 0;
+	local->original = fiber_real_origin();
+	local->fibers   = NULL;
+	local->size     = 0;
+	local->slot     = 0;
+	local->nlocal   = 0;
 
 #ifdef	SHARE_STACK
-	__thread_fiber->stack_size = __shared_stack_size;
-	__thread_fiber->stack_buff = mem_malloc(__thread_fiber->stack_size);
+	local->stack_size = __shared_stack_size;
+	local->stack_buff = mem_malloc(local->stack_size);
 # ifdef	USE_VALGRIND
-	__thread_fiber->vid = VALGRIND_STACK_REGISTER(__thread_fiber->stack_buff,
-			__thread_fiber->stack_buff + __shared_stack_size);
+	local->vid = VALGRIND_STACK_REGISTER(local->stack_buff,
+			local->stack_buff + __shared_stack_size);
 # endif
-	__thread_fiber->stack_dlen = 0;
+	local->stack_dlen = 0;
 #endif
 
-	ring_init(&__thread_fiber->ready);
-	ring_init(&__thread_fiber->dead);
+	ring_init(&local->ready);
+	ring_init(&local->dead);
 
 	if (thread_self() == main_thread_self()) {
-		__main_fiber = __thread_fiber;
+		__main_fiber = local;
 		atexit(fiber_schedule_main_free);
-	} else if (pthread_setspecific(__fiber_key, __thread_fiber) != 0) {
+	}
+
+#ifdef THREAD_LOCAL_DYNAMIC
+	if (pthread_setspecific(__fiber_key, local) != 0) {
 		printf("pthread_setspecific error!\r\n");
 		abort();
 	}
+#else
+	__thread_fiber = local;
+#endif
 }
 
 ACL_FIBER *fiber_origin(void)
@@ -528,10 +554,14 @@ int acl_fiber_signum(ACL_FIBER *fiber)
 
 void fiber_exit(int exit_code)
 {
+	THREAD *curr;
+
 	fiber_check();
 
-	__thread_fiber->exitcode = exit_code;
-	__thread_fiber->running->status = FIBER_STATUS_EXITING;
+	curr = __thread_fiber;
+	assert(curr);
+	curr->exitcode = exit_code;
+	curr->running->status = FIBER_STATUS_EXITING;
 
 	acl_fiber_switch();
 }

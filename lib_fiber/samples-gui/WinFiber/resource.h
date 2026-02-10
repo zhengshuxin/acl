@@ -15,6 +15,8 @@
 #define IDC_BUTTON1                     1005
 #define IDC_AWAIT_DNS                   1005
 #define IDC_RESOLVE                     1006
+#define IDC_RESOLVE2                    1007
+#define IDC_THREAD                      1007
 
 // Next default values for new objects
 // 
