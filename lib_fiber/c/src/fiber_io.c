@@ -26,11 +26,12 @@ typedef struct {
 
 static pthread_key_t __fiber_key;
 
+//#define THREAD_LOCAL_DYNAMIC
+
 #ifdef THREAD_LOCAL_DYNAMIC
-static FIBER_TLS *thread_fiber();
-#define __thread_fiber thread_fiber()
+# define __thread_local ((FIBER_TLS*) pthread_getspecific(__fiber_key))
 #else
-static __thread FIBER_TLS *__thread_fiber = NULL;
+static __thread FIBER_TLS *__thread_local = NULL;
 #endif
 
 static FIBER_TLS *__main_fiber = NULL;
@@ -41,14 +42,6 @@ static void fiber_io_loop(ACL_FIBER *fiber, void *ctx);
 #define STACK_SIZE	819200
 
 int var_maxfd = MAXFD;
-
-void acl_fiber_schedule_stop(void)
-{
-	if (__thread_fiber != NULL) {
-		fiber_io_check();
-		__thread_fiber->io_stop = 1;
-	}
-}
 
 #define RING_TO_FIBER(r) \
 	((ACL_FIBER *) ((char *) (r) - offsetof(ACL_FIBER, me)))
@@ -65,7 +58,7 @@ static void free_file(void *arg)
 static void thread_free(void *ctx)
 {
 	FIBER_TLS *tf = (FIBER_TLS *) ctx;
-	if (__thread_fiber == NULL) {
+	if (__thread_local == NULL) {
 		return;
 	}
 
@@ -85,14 +78,14 @@ static void thread_free(void *ctx)
 	array_free(tf->cache, free_file);
 	mem_free(tf);
 
-	if (__main_fiber == __thread_fiber) {
+	if (__main_fiber == __thread_local) {
 		__main_fiber = NULL;
 	}
 
 #ifdef THREAD_LOCAL_DYNAMIC
 	pthread_setspecific(__fiber_key, NULL);
 #else
-	__thread_fiber = NULL;
+	__thread_local = NULL;
 #endif
 }
 
@@ -100,9 +93,9 @@ static void fiber_io_main_free(void)
 {
 	if (__main_fiber) {
 		thread_free(__main_fiber);
-		if (__thread_fiber == __main_fiber) {
+		if (__thread_local == __main_fiber) {
 #ifndef THREAD_LOCAL_DYNAMIC
-			__thread_fiber = NULL;
+			__thread_local = NULL;
 #endif
 		}
 		__main_fiber = NULL;
@@ -112,9 +105,13 @@ static void fiber_io_main_free(void)
 	}
 }
 
+static void thread_exit(void *ctx fiber_unused)
+{
+}
+
 static void thread_once(void)
 {
-	if (pthread_key_create(&__fiber_key, thread_free) != 0) {
+	if (pthread_key_create(&__fiber_key, thread_exit) != 0) {
 		msg_fatal("%s(%d), %s: pthread_key_create error %s",
 			__FILE__, __LINE__, __FUNCTION__, last_serror());
 	}
@@ -153,43 +150,46 @@ static void thread_init(void)
 		msg_fatal("pthread_setspecific error!\r\n");
 	}
 #else
-	__thread_fiber = local;
+	__thread_local = local;
 #endif
 }
-
-#ifdef THREAD_LOCAL_DYNAMIC
-static FIBER_TLS *thread_fiber()
-{
-	return (FIBER_TLS*) pthread_getspecific(__fiber_key);
-}
-#endif
 
 static pthread_once_t __once_control = PTHREAD_ONCE_INIT;
 
 // Notice: don't write log here to avoid recursive calling when user calls
 // acl_fiber_msg_register() to hook the log process.
 
-void fiber_io_check(void)
+static void fiber_io_check(void)
 {
-	if (__thread_fiber == NULL) {
+#ifndef THREAD_LOCAL_DYNAMIC
+	if (__thread_local == NULL) {
 		if (pthread_once(&__once_control, thread_once) != 0) {
 			printf("%s(%d), %s: pthread_once error %s\r\n",
 				__FILE__, __LINE__, __FUNCTION__, last_serror());
 			abort();
 		}
-
 		thread_init();
-	} else if (var_hook_sys_api && __thread_fiber->ev_fiber == NULL) {
-		__thread_fiber->ev_fiber  = acl_fiber_create(fiber_io_loop,
-				__thread_fiber->event, STACK_SIZE);
-		__thread_fiber->io_stop   = 0;
+#else
+	if (pthread_once(&__once_control, thread_once) != 0) {
+		printf("%s(%d), %s: pthread_once error %s\r\n",
+			__FILE__, __LINE__, __FUNCTION__, last_serror());
+		abort();
+	}
+
+	if (__thread_local == NULL) {
+		thread_init();
+#endif
+	} else if (var_hook_sys_api && __thread_local->ev_fiber == NULL) {
+		__thread_local->ev_fiber  = acl_fiber_create(fiber_io_loop,
+				__thread_local->event, STACK_SIZE);
+		__thread_local->io_stop   = 0;
 	}
 }
 
 EVENT *fiber_io_event(void)
 {
 	fiber_io_check();
-	return __thread_fiber->event;
+	return __thread_local->event;
 }
 
 static long long fiber_io_stamp(void)
@@ -206,10 +206,10 @@ void fiber_timer_add(ACL_FIBER *fb, size_t milliseconds)
 
 	fb->when = now + (long long) milliseconds;
 	ring_detach(&fb->me);  // Detach the previous binding.
-	timer_cache_add(__thread_fiber->ev_timer, fb->when, &fb->me);
+	timer_cache_add(__thread_local->ev_timer, fb->when, &fb->me);
 
 	/* Compute the event waiting interval according the timers' head */
-	timer = TIMER_FIRST(__thread_fiber->ev_timer);
+	timer = TIMER_FIRST(__thread_local->ev_timer);
 
 	if (timer->expire <= now) {
 		/* If the first timer has been expired, we should wake up it
@@ -226,7 +226,7 @@ int fiber_timer_del(ACL_FIBER *fb)
 {
 	fiber_io_check();
 
-	return timer_cache_remove(__thread_fiber->ev_timer, fb->when, &fb->me);
+	return timer_cache_remove(__thread_local->ev_timer, fb->when, &fb->me);
 }
 
 // wakeup_timers - Wake up all waiters in timers set in fiber_timer_add.
@@ -274,16 +274,16 @@ static void fiber_io_loop(ACL_FIBER *self fiber_unused, void *ctx)
 	TIMER_CACHE_NODE *timer;
 	long long now, last = 0, left;
 
-	assert(ev == __thread_fiber->event);
+	assert(ev == __thread_local->event);
 
 	for (;;) {
 		while (acl_fiber_yield() > 0) {}
 
-		timer = TIMER_FIRST(__thread_fiber->ev_timer);
+		timer = TIMER_FIRST(__thread_local->ev_timer);
 		if (timer == NULL) {
 			left = -1;
 		} else {
-			now  = event_get_stamp(__thread_fiber->event);
+			now  = event_get_stamp(__thread_local->event);
 			if (now >= timer->expire) {
 				left = 0;
 			} else {
@@ -296,7 +296,7 @@ static void fiber_io_loop(ACL_FIBER *self fiber_unused, void *ctx)
 		/* Add 1 just for the deviation of epoll_wait */
 		event_process(ev, left > 0 ? (int) left + 1 : (int) left);
 
-		if (__thread_fiber == NULL || __thread_fiber->io_stop) {
+		if (__thread_local == NULL || __thread_local->io_stop) {
 			msg_info("%s(%d): io_stop set!", __FUNCTION__, __LINE__);
 			break;
 		}
@@ -315,7 +315,7 @@ static void fiber_io_loop(ACL_FIBER *self fiber_unused, void *ctx)
 
 #if 0
 			// Only sleep fiber alive ?
-			timer = TIMER_FIRST(__thread_fiber->ev_timer);
+			timer = TIMER_FIRST(__thread_local->ev_timer);
 			if (timer) {
 				continue;
 			}
@@ -329,12 +329,12 @@ static void fiber_io_loop(ACL_FIBER *self fiber_unused, void *ctx)
 
 		now = event_get_stamp(ev);
 		if (now - last >= left) {
-			wakeup_timers(__thread_fiber->ev_timer, now);
+			wakeup_timers(__thread_local->ev_timer, now);
 			last = now;
 		}
 
-		if (timer_cache_size(__thread_fiber->ev_timer) == 0) {
-			__thread_fiber->event->timeout = -1;
+		if (timer_cache_size(__thread_local->ev_timer) == 0) {
+			__thread_local->event->timeout = -1;
 		}
 	}
 
@@ -344,15 +344,13 @@ static void fiber_io_loop(ACL_FIBER *self fiber_unused, void *ctx)
 	// Don't set ev_fiber NULL here, using fiber_io_clear() to set it NULL
 	// in acl_fiber_schedule() after scheduling finished.
 	// 
-	// __thread_fiber->ev_fiber = NULL;
-	//thread_free(thread_fiber());
+	thread_free(__thread_local);
 }
 
 void fiber_io_clear(void)
 {
-	if (__thread_fiber) {
-		__thread_fiber->ev_fiber = NULL;
-		//thread_free(__thread_fiber);
+	if (__thread_local) {
+		__thread_local->ev_fiber = NULL;
 	}
 }
 
@@ -367,6 +365,8 @@ size_t acl_fiber_delay(size_t milliseconds)
 		return 0;
 	}
 
+	fiber_io_check();
+
 	if (milliseconds == 0) {
 		acl_fiber_yield();
 		return 0;
@@ -376,11 +376,11 @@ size_t acl_fiber_delay(size_t milliseconds)
 	fiber_timer_add(fiber, milliseconds);
 
 	fiber->wstatus |= FIBER_WAIT_DELAY;
-	WAITER_INC(__thread_fiber->event);
+	WAITER_INC(__thread_local->event);
 
 	acl_fiber_switch();
 
-	WAITER_DEC(__thread_fiber->event);
+	WAITER_DEC(__thread_local->event);
 	fiber->wstatus &= ~FIBER_WAIT_DELAY;
 
 	// Clear the flag been set in wakeup_timers.
@@ -514,7 +514,7 @@ int fiber_wait_read(FILE_EVENT *fe)
 	}
 
 	// When return 0 just let it go continue
-	ret = event_add_read(__thread_fiber->event, fe, read_callback);
+	ret = event_add_read(__thread_local->event, fe, read_callback);
 	if (ret <= 0) {
 		return ret;
 	}
@@ -524,7 +524,7 @@ int fiber_wait_read(FILE_EVENT *fe)
 	SET_READWAIT(fe);
 
 	if (!(fe->type & TYPE_INTERNAL)) {
-		WAITER_INC(__thread_fiber->event);
+		WAITER_INC(__thread_local->event);
 	}
 
 	if ((fe->mask & EVENT_SO_RCVTIMEO) && fe->r_timeout > 0) {
@@ -545,21 +545,21 @@ int fiber_wait_read(FILE_EVENT *fe)
 #endif
 
 	if (!(fe->type & TYPE_INTERNAL)) {
-		WAITER_DEC(__thread_fiber->event);
+		WAITER_DEC(__thread_local->event);
 	}
 
 	if (acl_fiber_canceled(curr)) {
 		// If the IO has been canceled, we should try to remove the
 		// IO read event directly(without delay deleting), because the
 		// fiber's wakeup process wasn't from read_callback normally.
-		event_del_read(__thread_fiber->event, fe, 1);
+		event_del_read(__thread_local->event, fe, 1);
 		acl_fiber_set_error(curr->errnum);
 		return -1;
 	} else if (curr->flag & FIBER_F_TIMER) {
 		// If the IO reading timeout set in setsockopt.
 		// Clear FIBER_F_TIMER flag been set in wakeup_timers.
 		curr->flag &= ~FIBER_F_TIMER;
-		event_del_read(__thread_fiber->event, fe, 0);
+		event_del_read(__thread_local->event, fe, 0);
 
 		acl_fiber_set_errno(curr, FIBER_EAGAIN);
 		acl_fiber_set_error(FIBER_EAGAIN);
@@ -601,7 +601,7 @@ int fiber_wait_write(FILE_EVENT *fe)
 		return -1;
 	}
 
-	ret = event_add_write(__thread_fiber->event, fe, write_callback);
+	ret = event_add_write(__thread_local->event, fe, write_callback);
 	if (ret <= 0) {
 		return ret;
 	}
@@ -611,7 +611,7 @@ int fiber_wait_write(FILE_EVENT *fe)
 	SET_WRITEWAIT(fe);
 
 	if (!(fe->type & TYPE_INTERNAL)) {
-		WAITER_INC(__thread_fiber->event);
+		WAITER_INC(__thread_local->event);
 	}
 
 	if ((fe->mask & EVENT_SO_SNDTIMEO) && fe->w_timeout > 0) {
@@ -628,16 +628,16 @@ int fiber_wait_write(FILE_EVENT *fe)
 	fe->fiber_w = NULL;
 
 	if (!(fe->type & TYPE_INTERNAL)) {
-		WAITER_DEC(__thread_fiber->event);
+		WAITER_DEC(__thread_local->event);
 	}
 
 	if (acl_fiber_canceled(curr)) {
-		event_del_write(__thread_fiber->event, fe, 1);
+		event_del_write(__thread_local->event, fe, 1);
 		acl_fiber_set_error(curr->errnum);
 		return -1;
 	} else if (curr->flag & FIBER_F_TIMER) {
 		curr->flag &= ~FIBER_F_TIMER;
-		event_del_write(__thread_fiber->event, fe, 0);
+		event_del_write(__thread_local->event, fe, 0);
 
 		acl_fiber_set_errno(curr, FIBER_EAGAIN);
 		acl_fiber_set_error(FIBER_EAGAIN);
@@ -658,7 +658,7 @@ FILE_EVENT *fiber_file_get(socket_t fd)
 	//_snprintf(key, sizeof(key), "%u", fd);
 	_i64toa(fd, key, 10); // key's space large enougth
 
-	return (FILE_EVENT *) htable_find(__thread_fiber->events, key);
+	return (FILE_EVENT *) htable_find(__thread_local->events, key);
 #else
 	fiber_io_check();
 	if (fd <= INVALID_SOCKET || fd >= var_maxfd) {
@@ -676,7 +676,7 @@ FILE_EVENT *fiber_file_get(socket_t fd)
 		return NULL;
 	}
 
-	return __thread_fiber->events[fd];
+	return __thread_local->events[fd];
 #endif
 }
 
@@ -688,18 +688,18 @@ void fiber_file_set(FILE_EVENT *fe)
 	//_snprintf(key, sizeof(key), "%u", fe->fd);
 	_i64toa(fe->fd, key, 10);
 
-	htable_enter(__thread_fiber->events, key, fe);
+	htable_enter(__thread_local->events, key, fe);
 #else
 	if (fe->fd <= INVALID_SOCKET || fe->fd >= (socket_t) var_maxfd) {
 		msg_fatal("%s(%d): invalid fd=%d", __FUNCTION__, __LINE__, fe->fd);
 	}
 
-	if (__thread_fiber->events[fe->fd] != NULL) {
+	if (__thread_local->events[fe->fd] != NULL) {
 		msg_fatal("%s(%d): exist fd=%d, old=%p new=%p", __FUNCTION__,
-			__LINE__, fe->fd, __thread_fiber->events[fe->fd], fe);
+			__LINE__, fe->fd, __thread_local->events[fe->fd], fe);
 	}
 
-	__thread_fiber->events[fe->fd] = fe;
+	__thread_local->events[fe->fd] = fe;
 #endif
 }
 
@@ -756,7 +756,7 @@ static int fiber_file_del(FILE_EVENT *fe, socket_t fd)
 	//_snprintf(key, sizeof(key), "%u", fe->fd);
 	_i64toa(fd, key, 10);
 
-	htable_delete(__thread_fiber->events, key, NULL);
+	htable_delete(__thread_local->events, key, NULL);
 	return 0;
 #else
 	if (fd == INVALID_SOCKET || fd >= var_maxfd) {
@@ -764,13 +764,13 @@ static int fiber_file_del(FILE_EVENT *fe, socket_t fd)
 		return -1;
 	}
 
-	if (__thread_fiber->events[fd] != fe) {
+	if (__thread_local->events[fd] != fe) {
 		msg_error("%s(%d): invalid fe=%p, fd=%d, origin=%p",
-			__FUNCTION__, __LINE__, fe, fd, __thread_fiber->events[fd]);
+			__FUNCTION__, __LINE__, fe, fd, __thread_local->events[fd]);
 		return -1;
 	}
 
-	__thread_fiber->events[fd] = NULL;
+	__thread_local->events[fd] = NULL;
 	return 0;
 #endif
 }
@@ -802,7 +802,7 @@ int fiber_file_close(FILE_EVENT *fe)
 
 	// At first, we should remove the IO event for the fd.
 	if (!IS_CLOSING(fe)) {
-		EVENT *event = __thread_fiber->event;
+		EVENT *event = __thread_local->event;
 		event_close(event, fe);
 	}
 
@@ -821,8 +821,8 @@ int fiber_file_close(FILE_EVENT *fe)
 			CLR_READWAIT(fe);
 
 #ifdef HAS_IO_URING
-			if (EVENT_IS_IO_URING(__thread_fiber->event)) {
-				file_cancel(__thread_fiber->event, fe,
+			if (EVENT_IS_IO_URING(__thread_local->event)) {
+				file_cancel(__thread_local->event, fe,
 					CANCEL_IO_READ);
 			} else {
 				acl_fiber_kill(fe->fiber_r);
@@ -848,8 +848,8 @@ int fiber_file_close(FILE_EVENT *fe)
 			SET_CLOSING(fe);
 
 #ifdef HAS_IO_URING
-			if (EVENT_IS_IO_URING(__thread_fiber->event)) {
-				file_cancel(__thread_fiber->event, fe,
+			if (EVENT_IS_IO_URING(__thread_local->event)) {
+				file_cancel(__thread_local->event, fe,
 					CANCEL_IO_WRITE);
 			} else {
 				acl_fiber_kill(fe->fiber_w);
@@ -874,7 +874,7 @@ FILE_EVENT *fiber_file_cache_get(socket_t fd)
 
 	fiber_io_check();
 
-	fe = (FILE_EVENT*) array_pop_back(__thread_fiber->cache);
+	fe = (FILE_EVENT*) array_pop_back(__thread_local->cache);
 	if (fe == NULL) {
 		fe = file_event_alloc(fd);
 	} else {
@@ -910,9 +910,9 @@ void fiber_file_cache_put(FILE_EVENT *fe)
 		acl_fiber_sem_free(fe->mbox_wsem);
 		fe->mbox_wsem = NULL;
 	}
-	if (array_size(__thread_fiber->cache) < __thread_fiber->cache_max) {
+	if (array_size(__thread_local->cache) < __thread_local->cache_max) {
 		if (!(fe->status & STATUS_BUFFED)) {
-			array_push_back(__thread_fiber->cache, fe);
+			array_push_back(__thread_local->cache, fe);
 			fe->status |= STATUS_BUFFED;
 		}
 	} else {
@@ -936,3 +936,11 @@ void fiber_file_cache_unrefer(FILE_EVENT *fe)
 }
 
 /****************************************************************************/
+
+void acl_fiber_schedule_stop(void)
+{
+	if (__thread_local != NULL) {
+		fiber_io_check();
+		__thread_local->io_stop = 1;
+	}
+}

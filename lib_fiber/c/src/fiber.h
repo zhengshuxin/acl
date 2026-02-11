@@ -129,7 +129,7 @@ void fiber_exit(int exit_code);
 /* in fiber_io.c */
 extern int var_maxfd;
 
-void fiber_io_check(void);
+//void fiber_io_check(void);
 void fiber_io_clear(void);
 
 // fiber_wait_read and fiber_wait_write will check if the given fd holding
