@@ -6,7 +6,7 @@
 #include <valgrind/valgrind.h>
 #endif
 
-#define FIBER_STACK_GUARD
+//#define FIBER_STACK_GUARD
 #ifdef	FIBER_STACK_GUARD
 #include <sys/mman.h>
 #endif
@@ -49,14 +49,13 @@ static ATOMIC   *__idgen_atomic = NULL;
 static long long __idgen_value  = 0;
 static pthread_key_t __fiber_key;
 
-//#define THREAD_LOCAL_DYNAMIC
+#define THREAD_LOCAL_DYNAMIC
 
 #ifdef THREAD_LOCAL_DYNAMIC
 # define __thread_local ((THREAD*) pthread_getspecific(__fiber_key))
 #else
 static __thread THREAD *__thread_local = NULL;
 #endif
-static THREAD          *__main_fiber   = NULL;
 static __thread int __scheduled = 0;
 static __thread int __schedule_auto = 0;
 __thread int var_hook_sys_api   = 0;
@@ -117,28 +116,13 @@ static void thread_free(THREAD *tf)
 	fiber_real_free(tf->original);
 	mem_free(tf);
 
-	if (__main_fiber == __thread_local) {
-		__main_fiber = NULL;
-	}
-
 #ifdef THREAD_LOCAL_DYNAMIC
-	pthread_setspecific(__fiber_key, NULL);
+	if (thread_self() != main_thread_self()) {
+		pthread_setspecific(__fiber_key, NULL);
+	}
 #else
 	__thread_local = NULL;
 #endif
-}
-
-static void fiber_schedule_main_free(void)
-{
-	if (__main_fiber) {
-		thread_free(__main_fiber);
-		if (__thread_local == __main_fiber) {
-			__main_fiber = NULL;
-		}
-#ifdef THREAD_LOCAL_DYNAMIC
-		pthread_setspecific(__fiber_key, NULL);
-#endif
-	}
 }
 
 static void free_atomic_onexit(void)
@@ -149,8 +133,11 @@ static void free_atomic_onexit(void)
 	}
 }
 
-static void thread_exit(void *ctx fiber_unused)
+static void thread_exit(void *ctx)
 {
+	if (ctx) {
+		thread_free((THREAD *) ctx);
+	}
 }
 
 static void thread_init(void)
@@ -159,6 +146,10 @@ static void thread_init(void)
 		msg_fatal("%s(%d), %s: pthread_key_create error %s",
 			__FILE__, __LINE__, __FUNCTION__, last_serror());
 	}
+
+#if defined(_WIN32) || defined(_WIN64)
+	lib_init();
+#endif
 
 	__idgen_atomic = atomic_new();
 	atomic_set(__idgen_atomic, &__idgen_value);
@@ -211,11 +202,6 @@ static void fiber_check(void)
 
 	ring_init(&local->ready);
 	ring_init(&local->dead);
-
-	if (thread_self() == main_thread_self()) {
-		__main_fiber = local;
-		atexit(fiber_schedule_main_free);
-	}
 
 #ifdef THREAD_LOCAL_DYNAMIC
 	if (pthread_setspecific(__fiber_key, local) != 0) {
@@ -857,6 +843,15 @@ void acl_fiber_schedule_with(int event_mode)
 	acl_fiber_schedule();
 }
 
+#if defined(_WIN32) || defined(_WIN64)
+static pthread_key_t dummy_key;
+
+static void thread_exit_dummy(void* ctx fiber_unused)
+{
+	msg_info("%s(%d): schedule end now, key=%d\r\n", __FUNCTION__, __LINE__, dummy_key);
+}
+#endif
+
 void acl_fiber_schedule(void)
 {
 	ACL_FIBER *fiber;
@@ -868,6 +863,13 @@ void acl_fiber_schedule(void)
 
 #if defined(USE_FAST_TIME)
 	set_time_metric(1000);
+#endif
+
+#if defined(_WIN32) || defined(_WIN64)
+	// On windows, the __tls_key in pthread_key_create() must be created in no
+	// fiber mode, because the destructor set in FlsAlloc must in no fiber mode.
+	// See: https://github.com/acl-dev/acl/issues/363
+	pthread_key_create(&dummy_key, thread_exit_dummy);
 #endif
 
 	fiber_check();
@@ -901,7 +903,6 @@ void acl_fiber_schedule(void)
 	fiber_io_clear();
 	fiber_hook_api(0);
 	__scheduled = 0;
-	thread_free(__thread_local);
 }
 
 void acl_fiber_switch(void)

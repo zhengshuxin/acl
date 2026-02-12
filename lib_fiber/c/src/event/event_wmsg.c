@@ -13,8 +13,8 @@ typedef struct EVENT_WMSG {
 	EVENT event;
 	UINT  nMsg;
 	HWND  hWnd;
+	char *class_name;
 	HINSTANCE   hInstance;
-	const char *class_name;
 	FILE_EVENT **files;
 	int  size;
 	int  count;
@@ -51,14 +51,26 @@ static void wmsg_free(EVENT *ev)
 		WNDCLASSEX wcx;
 
 		DestroyWindow(ew->hWnd);
-		if (ew->class_name && GetClassInfoEx(ew->hInstance,
-			ew->class_name, &wcx)) {
-			msg_info("%s(%d): unregister class: %s",
-				__FUNCTION__, __LINE__, ew->class_name);
-			UnregisterClass(ew->class_name, ew->hInstance);
+
+		if (GetClassInfoEx(ew->hInstance, ew->class_name, &wcx)) {
+			if (UnregisterClass(ew->class_name, ew->hInstance)) {
+				msg_info("%s(%d): unregister ok, class: %s",
+					__FUNCTION__, __LINE__, ew->class_name);
+			} else {
+				msg_error("%s(%d): unregister err: %s, %d, class: %s",
+					__FUNCTION__, __LINE__, last_serror(),
+					acl_fiber_last_error(), ew->class_name);
+
+			}
+		} else {
+			msg_warn("%s(%d): GetClassInfoEx error=%s, %d, class: %s",
+				__FUNCTION__, __LINE__, last_serror(), acl_fiber_last_error(),
+				ew->class_name);
 		}
 	}
+
 	htable_free(ew->tbl, NULL);
+	mem_free(ew->class_name);
 	mem_free(ew->files);
 	mem_free(ew);
 }
@@ -367,10 +379,13 @@ static BOOL InitApplication(const char *class_name, HINSTANCE hInstance)
 
 	/* Register the window class. */
 	if (RegisterClassEx(&wcx) == 0) {
-		msg_error("%s(%d): RegisterClassEx error(%d, %s)", __FUNCTION__,
-			__LINE__, acl_fiber_last_error(), last_serror());
+		msg_error("%s(%d): RegisterClassEx error(%d, %s), class: %s",
+			__FUNCTION__, __LINE__, acl_fiber_last_error(),
+			last_serror(), class_name);
 		return FALSE;
 	} else {
+		msg_info("%s(%d): RegisterClassEx ok, class: %s",
+			__FUNCTION__, __LINE__, class_name);
 		return TRUE;
 	}
 }
@@ -428,7 +443,12 @@ EVENT *event_wmsg_create(int size)
 {
 	EVENT_WMSG *ew = (EVENT_WMSG *) mem_calloc(1, sizeof(EVENT_WMSG));
 	HINSTANCE hInstance = GetModuleHandle(NULL);
-	HWND hWnd = CreateSockWindow(__class_name, hInstance);
+	HWND hWnd;
+	char buf[256];
+
+	_snprintf(buf, sizeof(buf) - 1, "%s_%ld", __class_name, thread_self());
+	buf[sizeof(buf) - 1] = '\0';
+	hWnd = CreateSockWindow(buf, hInstance);
 
 	ew->files = (FILE_EVENT**) mem_calloc(size, sizeof(FILE_EVENT*));
 	ew->size  = size;
@@ -437,7 +457,7 @@ EVENT *event_wmsg_create(int size)
 	ew->nMsg         = WM_SOCKET_NOTIFY;
 	ew->hWnd         = hWnd;
 	ew->hInstance    = hInstance;
-	ew->class_name   = __class_name;
+	ew->class_name   = mem_strdup(buf);
 	ew->tbl          = htable_create(10);
 
 	ew->event.name   = wmsg_name;

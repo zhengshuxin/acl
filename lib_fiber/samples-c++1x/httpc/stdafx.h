@@ -8,6 +8,7 @@
 
 #include "lib_acl.h"
 #include "acl_cpp/lib_acl.hpp"
+#include "fiber/libfiber.h"
 #include "fiber/fiber.hpp"
 #include "fiber/go_fiber.hpp"
 

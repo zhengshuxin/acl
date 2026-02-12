@@ -13,7 +13,7 @@ void CFiberSleep::run(void)
 {
 	printf("timer fiber-%d created\r\n", acl::fiber::self());
 	for (int i = 0; i < 5; i++) {
-		acl::fiber::delay(1000);
+		acl::fiber::delay(100);
 		printf("fiber-%d wakeup\r\n", acl::fiber::self());
 	}
 

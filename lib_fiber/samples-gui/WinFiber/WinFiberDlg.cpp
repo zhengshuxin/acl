@@ -360,11 +360,18 @@ static void fiber_resolve(void)
 	std::vector<std::string> addrs;
 
 	// 因为需要等待线程解析完成，所以此处可使得引用方式传参
-	go_wait[&] {
-		if (!ResolveDNS(name.c_str(), &addrs)) {
+	//go_wait[&] {
+	acl::wait_group sync;
+	sync.add(1);
+	std::thread thread([&] {
+		if (0 && !ResolveDNS(name.c_str(), &addrs)) {
 			printf(">>>resolve DNS error, name=%s\r\n", name.c_str());
 		}
-	};
+		sync.done();
+	});
+
+	thread.detach();
+	sync.wait();
 
 	printf(">>>resolve done: name=%s, result count=%zd\r\n",
 		name.c_str(), addrs.size());
@@ -506,7 +513,7 @@ static void thread_run(acl::wait_group& sync)
 			}
 		};
 		acl::fiber::schedule();
-		//sync.done();
+		sync.done();
 }
 
 void CWinFiberDlg::OnBnClickedThread()
@@ -516,14 +523,14 @@ void CWinFiberDlg::OnBnClickedThread()
 
 	go[] {
 		acl::wait_group sync;
-		//sync.add(1);
+		sync.add(1);
 
 		for (int i = 0; i < 1; i++) {
 			std::thread thr([&sync] { thread_run(sync); });
 			thr.detach();
 		}
 
-		//sync.wait();
+		sync.wait();
 		printf("All threas exited, the main thread: %ld\r\n", (long) GetCurrentThreadId());
 	};
 }

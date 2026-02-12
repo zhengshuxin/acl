@@ -49,12 +49,26 @@ static void usage(const char* procname) {
 		, procname);
 }
 
+static void fiber_main(ACL_FIBER *, void*) {
+		printf("hello world!\r\n");
+}
+
+static void test() {
+	for (int i = 0; i < 10; i++) {
+		acl_fiber_create(fiber_main, NULL, 320000);
+		acl::fiber::schedule();
+		printf("Bye!\r\n");
+	}
+}
+
 int main(int argc, char *argv[]) {
 	int  ch, nfiber = 1, count = 100;
 	acl::string addr = "127.0.0.1:8088", event_type("kernel");
 
 	acl::acl_cpp_init();
 	acl::log::stdout_open(true);
+
+	test(); return 0;
 
 	while ((ch = getopt(argc, argv, "he:s:c:n:")) > 0) {
 		switch (ch) {

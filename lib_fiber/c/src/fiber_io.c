@@ -26,15 +26,13 @@ typedef struct {
 
 static pthread_key_t __fiber_key;
 
-//#define THREAD_LOCAL_DYNAMIC
+#define THREAD_LOCAL_DYNAMIC
 
 #ifdef THREAD_LOCAL_DYNAMIC
 # define __thread_local ((FIBER_TLS*) pthread_getspecific(__fiber_key))
 #else
 static __thread FIBER_TLS *__thread_local = NULL;
 #endif
-
-static FIBER_TLS *__main_fiber = NULL;
 
 static void fiber_io_loop(ACL_FIBER *fiber, void *ctx);
 
@@ -78,10 +76,6 @@ static void thread_free(void *ctx)
 	array_free(tf->cache, free_file);
 	mem_free(tf);
 
-	if (__main_fiber == __thread_local) {
-		__main_fiber = NULL;
-	}
-
 #ifdef THREAD_LOCAL_DYNAMIC
 	pthread_setspecific(__fiber_key, NULL);
 #else
@@ -89,24 +83,11 @@ static void thread_free(void *ctx)
 #endif
 }
 
-static void fiber_io_main_free(void)
+static void thread_exit(void *ctx)
 {
-	if (__main_fiber) {
-		thread_free(__main_fiber);
-		if (__thread_local == __main_fiber) {
-#ifndef THREAD_LOCAL_DYNAMIC
-			__thread_local = NULL;
-#endif
-		}
-		__main_fiber = NULL;
-#ifdef THREAD_LOCAL_DYNAMIC
-		pthread_setspecific(__fiber_key, NULL);
-#endif
+	if (ctx) {
+		thread_free(ctx);
 	}
-}
-
-static void thread_exit(void *ctx fiber_unused)
-{
 }
 
 static void thread_once(void)
@@ -139,11 +120,6 @@ static void thread_init(void)
 
 	local->cache     = array_create(100, ARRAY_F_UNORDER);
 	local->cache_max = 1000;
-
-	if (thread_self() == main_thread_self()) {
-		__main_fiber = local;
-		atexit(fiber_io_main_free);
-	}
 
 #ifdef THREAD_LOCAL_DYNAMIC
 	if (pthread_setspecific(__fiber_key, local) != 0) {
@@ -344,7 +320,6 @@ static void fiber_io_loop(ACL_FIBER *self fiber_unused, void *ctx)
 	// Don't set ev_fiber NULL here, using fiber_io_clear() to set it NULL
 	// in acl_fiber_schedule() after scheduling finished.
 	// 
-	thread_free(__thread_local);
 }
 
 void fiber_io_clear(void)
@@ -664,11 +639,9 @@ FILE_EVENT *fiber_file_get(socket_t fd)
 	if (fd <= INVALID_SOCKET || fd >= var_maxfd) {
 #ifdef	HAS_IO_URING
 		if (EVENT_IS_IO_URING(fiber_io_event())) {
-			printf("%s(%d): invalid fd=%d\r\n",
-				__FUNCTION__, __LINE__, fd);
+			printf("%s(%d): invalid fd=%d\r\n", __FUNCTION__, __LINE__, fd);
 		} else {
-			msg_error("%s(%d): invalid fd=%d",
-				__FUNCTION__, __LINE__, fd);
+			msg_error("%s(%d): invalid fd=%d", __FUNCTION__, __LINE__, fd);
 		}
 #else
 		msg_error("%s(%d): invalid fd=%d", __FUNCTION__, __LINE__, fd);

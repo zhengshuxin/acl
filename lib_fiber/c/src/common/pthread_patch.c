@@ -7,107 +7,73 @@
 
 #ifdef SYS_WIN
 
-typedef struct {
-	pthread_key_t key;
-	void (*destructor)(void *);
-} TLS_KEY;
+//#define USE_FLS
 
-typedef struct {
-	TLS_KEY *tls_key;
-	void *value;
-} TLS_VALUE;
+#ifdef USE_FLS
 
-static int     __thread_inited = 0;
-static TLS_KEY __tls_key_list[PTHREAD_KEYS_MAX];
-static pthread_mutex_t __thread_lock;
-static pthread_key_t   __tls_value_list_key         = TLS_OUT_OF_INDEXES;
-static pthread_once_t  __create_thread_control_once = PTHREAD_ONCE_INIT;
+//#define PTHREAD_ONCE_INIT INIT_ONCE_STATIC_INIT
 
-static void tls_value_list_free(void);
-
-void pthread_end(void)
+typedef struct OnceWrapper
 {
-	static int __thread_ended = 0;
-	int   i;
+    void (*init_routine)(void);
+} OnceWrapper;
 
-	if (__thread_ended)
-		return;
-
-	tls_value_list_free();
-	__thread_ended = 1;
-	pthread_mutex_destroy(&__thread_lock);
-
-	for (i = 0; i < PTHREAD_KEYS_MAX; i++) {
-		if (__tls_key_list[i].key >= 0
-			&& __tls_key_list[i].key < PTHREAD_KEYS_MAX)
-		{
-			TlsFree(__tls_key_list[i].key);
-			__tls_key_list[i].key = TLS_OUT_OF_INDEXES;
-		}
-		__tls_key_list[i].destructor = NULL;
-	}
+BOOL CALLBACK InitOnceCallback(
+    PINIT_ONCE InitOnce,
+    PVOID Parameter,
+    PVOID* Context)
+{
+    OnceWrapper* wrapper = (OnceWrapper*)Parameter;
+    wrapper->init_routine();
+    return TRUE;
 }
 
-/* 每个进程的唯一初始化函数 */
-
-static void pthread_init_once(void)
+int pthread_once(pthread_once_t* once_control, void (*init_routine)(void))
 {
-	const char *myname = "pthread_init_once";
-	int   i;
+    OnceWrapper wrapper;
+	wrapper.init_routine = init_routine;
 
-	pthread_mutex_init(&__thread_lock, NULL);
-	__thread_inited = 1;
+    BOOL ok = InitOnceExecuteOnce(
+        once_control,
+        InitOnceCallback,
+        &wrapper,
+        NULL);
 
-	for (i = 0; i < PTHREAD_KEYS_MAX; i++) {
-		__tls_key_list[i].destructor = NULL;
-		__tls_key_list[i].key        = TLS_OUT_OF_INDEXES;
-	}
-
-	__tls_value_list_key = TlsAlloc();
-	if (__tls_value_list_key == TLS_OUT_OF_INDEXES)
-		msg_fatal("%s(%d): TlsAlloc error(%s)",
-			myname, __LINE__, last_serror());
-	if (__tls_value_list_key < 0
-		|| __tls_value_list_key >= PTHREAD_KEYS_MAX)
-	{
-		msg_fatal("%s(%d): TlsAlloc error(%s), not in(%d, %d)",
-			myname, __LINE__, last_serror(),
-			0, PTHREAD_KEYS_MAX);
-	}
-
-	__tls_key_list[__tls_value_list_key].destructor = NULL;
-	__tls_key_list[__tls_value_list_key].key = __tls_value_list_key;
+    return ok ? 0 : -1;
 }
 
-/* 获得线程局部变量链表 */
-
-static FIFO *tls_value_list_get(void)
+int pthread_key_create(pthread_key_t* key, void (*destructor)(void*))
 {
-	FIFO *tls_value_list_ptr;
+    if (!key)
+        return -1;
 
-	tls_value_list_ptr = (FIFO*) TlsGetValue(__tls_value_list_key);
-	if (tls_value_list_ptr == NULL) {
-		tls_value_list_ptr = fifo_new();
-		TlsSetValue(__tls_value_list_key, tls_value_list_ptr);
-	}
-	return tls_value_list_ptr;
+    DWORD k = FlsAlloc((PFLS_CALLBACK_FUNCTION)destructor);
+
+    if (k == FLS_OUT_OF_INDEXES)
+        return -1;
+
+    *key = k;
+    return 0;
 }
 
-static void tls_value_list_on_free(void *ctx)
+int pthread_setspecific(pthread_key_t key, const void* value)
 {
-	mem_free(ctx);
+    return FlsSetValue(key, (PVOID)value) ? 0 : -1;
 }
 
-static void tls_value_list_free(void)
+void* pthread_getspecific(pthread_key_t key)
 {
-	FIFO *tls_value_list_ptr;
-
-	tls_value_list_ptr = (FIFO*) TlsGetValue(__tls_value_list_key);
-	if (tls_value_list_ptr != NULL) {
-		TlsSetValue(__tls_value_list_key, NULL);
-		fifo_free(tls_value_list_ptr, tls_value_list_on_free);
-	}
+    return FlsGetValue(key);
 }
+
+int pthread_key_delete(pthread_key_t key)
+{
+    return FlsFree(key) ? 0 : -1;
+}
+
+#else
+
+static pthread_once_t  __control_once = PTHREAD_ONCE_INIT;
 
 int pthread_once(pthread_once_t *once_control, void (*init_routine)(void))
 {
@@ -152,25 +118,93 @@ int pthread_once(pthread_once_t *once_control, void (*init_routine)(void))
 	return 1;  /* 不可达代码，避免编译器报警告 */
 }
 
-int pthread_key_create(pthread_key_t *key_ptr, void (*destructor)(void*))
+///////////////////////////////////////////////////////////////////////////////
+
+typedef struct {
+	pthread_key_t tkey;
+	void (*destructor)(void *);
+	FIFO *keys;
+} TLS_KEY;
+
+static pthread_key_t   __tls_key      = TLS_OUT_OF_INDEXES;
+static pthread_key_t   __fls_key      = FLS_OUT_OF_INDEXES;
+
+extern int acl_fiber_scheduled(void);
+
+static void thread_exit(void *ctx)
 {
-	const char *myname = "pthread_key_create";
+	TLS_KEY *tkey = (TLS_KEY *) ctx;
+	void (*destructor)(void*);
+	void *context;
 
-	pthread_once(&__create_thread_control_once, pthread_init_once);
+	if (tkey->keys) {
+		TLS_KEY *iter;
+		while ((iter = (TLS_KEY *) tkey->keys->pop_back(tkey->keys))) {
+			if (iter->destructor) {
+				destructor = iter->destructor;
+				context = TlsGetValue(iter->tkey);
+				mem_free(iter);
 
-	*key_ptr = TlsAlloc();
-	if (*key_ptr == TLS_OUT_OF_INDEXES) {
-		return ENOMEM;
-	} else if (*key_ptr >= PTHREAD_KEYS_MAX) {
-		msg_error("%s(%d): key(%d) > PTHREAD_KEYS_MAX(%d)",
-			myname, __LINE__, *key_ptr, PTHREAD_KEYS_MAX);
-		TlsFree(*key_ptr);
-		*key_ptr = TLS_OUT_OF_INDEXES;
-		return ENOMEM;
+				destructor(context);
+			}
+		}
 	}
 
-	__tls_key_list[*key_ptr].destructor = destructor;
-	__tls_key_list[*key_ptr].key = *key_ptr;
+	destructor = tkey->destructor;
+	context = TlsGetValue(tkey->tkey);
+
+	fifo_free(tkey->keys, mem_free);
+	mem_free(tkey);
+
+	if (destructor) {
+		destructor(context);
+	}
+}
+
+/* 每个进程的唯一初始化函数 */
+
+static void pthread_init_once(void)
+{
+	__tls_key = TlsAlloc();
+	__fls_key = FlsAlloc(thread_exit);
+}
+
+int pthread_key_create(pthread_key_t *key_ptr, void (*destructor)(void*))
+{
+	pthread_once(&__control_once, pthread_init_once);
+
+	if (*key_ptr <= 0 && *key_ptr != TLS_OUT_OF_INDEXES) {
+		*key_ptr = TlsAlloc();
+		assert(*key_ptr != TLS_OUT_OF_INDEXES);
+	}
+
+	TLS_KEY *tkey    = (TLS_KEY*) mem_calloc(sizeof(TLS_KEY), 1), *curr;
+	tkey->tkey       = *key_ptr;
+	tkey->destructor = destructor;
+
+	if (acl_fiber_scheduled()) {
+		curr = (TLS_KEY *) TlsGetValue(__tls_key);
+		if (curr && curr->keys) {
+			curr->keys->push_back(curr->keys, tkey);
+		} else {
+			msg_error("%s(%d): no TLS_KEY for key=%d",
+				__FUNCTION__, __LINE__, __tls_key);
+		}
+	} else if (__tls_key == TLS_OUT_OF_INDEXES) {
+		msg_error("%s(%d): __tls_key is invalid", __FUNCTION__, __LINE__);
+	} else if ((curr = TlsGetValue(__tls_key)) != NULL) {
+		if (curr->keys) {
+			curr->keys->push_back(curr->keys, tkey);
+		} else {
+			msg_error("%s(%d): keys is null", __FUNCTION__, __LINE__);
+		}
+	} else {
+		assert(__fls_key != FLS_OUT_OF_INDEXES);
+		tkey->keys = fifo_new();
+		TlsSetValue(__tls_key, tkey);
+		FlsSetValue(__fls_key, tkey);
+	}
+
 	return 0;
 }
 
@@ -181,48 +215,21 @@ void *pthread_getspecific(pthread_key_t key)
 
 int pthread_setspecific(pthread_key_t key, void *value)
 {
-	const char *myname = "pthread_setspecific";
-	FIFO *tls_value_list_ptr = tls_value_list_get();
-	//ITER iter;
-
-	if (key < 0 || key >= PTHREAD_KEYS_MAX) {
-		msg_error("%s(%d): key(%d) invalid", myname, __LINE__, key);
+	if (key <= 0 || key == TLS_OUT_OF_INDEXES) {
+		msg_error("%s(%d): key(%d) invalid", __FUNCTION__, __LINE__, key);
 		return EINVAL;
 	}
-	if (__tls_key_list[key].key != key) {
-		msg_error("%s(%d): __tls_key_list[%d].key(%d) != key(%d)",
-			myname, __LINE__, key, __tls_key_list[key].key, key);
-		return EINVAL;
-	}
-
-#if 0
-	foreach(iter, tls_value_list_ptr) {
-		TLS_VALUE *tls_value = (TLS_VALUE*) iter.data;
-		if (tls_value->tls_key != NULL
-			&& tls_value->tls_key->key == key) {
-
-			/* 如果相同的键存在则需要先释放旧数据 */
-			if (tls_value->tls_key->destructor && tls_value->value)
-				tls_value->tls_key->destructor(tls_value->value);
-			tls_value->tls_key = NULL;
-			tls_value->value = NULL;
-			break;
-		}
-	}
-#endif
 
 	if (TlsSetValue(key, value)) {
-		TLS_VALUE *tls_value = (TLS_VALUE*) mem_malloc(sizeof(TLS_VALUE));
-		tls_value->tls_key = &__tls_key_list[key];
-		tls_value->value = value;
-		fifo_push(tls_value_list_ptr, tls_value);
 		return 0;
 	} else {
 		msg_error("%s(%d): TlsSetValue(key=%d) error(%s)",
-			myname, __LINE__, key, last_serror());
+			__FUNCTION__, __LINE__, key, last_serror());
 		return -1;
 	}
 }
+
+#endif /* USE_FLS */
 
 /* Free the mutex */
 int pthread_mutex_destroy(pthread_mutex_t *mutex)
