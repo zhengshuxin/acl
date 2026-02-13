@@ -53,12 +53,15 @@ static void free_file(void *arg)
 	file_event_unrefer(fe);
 }
 
-static void thread_free(void *ctx)
+static void thread_free(FIBER_TLS *tf)
 {
-	FIBER_TLS *tf = (FIBER_TLS *) ctx;
+#ifndef THREAD_LOCAL_DYNAMIC
 	if (__thread_local == NULL) {
 		return;
 	}
+
+	__thread_local = NULL;
+#endif
 
 	if (tf->event) {
 		event_free(tf->event);
@@ -75,18 +78,12 @@ static void thread_free(void *ctx)
 
 	array_free(tf->cache, free_file);
 	mem_free(tf);
-
-#ifdef THREAD_LOCAL_DYNAMIC
-	pthread_setspecific(__fiber_key, NULL);
-#else
-	__thread_local = NULL;
-#endif
 }
 
 static void thread_exit(void *ctx)
 {
 	if (ctx) {
-		thread_free(ctx);
+		thread_free((FIBER_TLS *) ctx);
 	}
 }
 

@@ -87,19 +87,23 @@ static void thread_free(THREAD *tf)
 	ACL_FIBER *fiber;
 	unsigned int i;
 
+#ifndef THREAD_LOCAL_DYNAMIC
 	if (__thread_local == NULL) {
 		return;
 	}
 
+	__thread_local = NULL;
+#endif
+
 	/* Free fiber object in the dead fibers link */
-	while ((head = ring_pop_head(&__thread_local->dead))) {
+	while ((head = ring_pop_head(&tf->dead))) {
 		fiber = RING_TO_APPL(head, ACL_FIBER, me);
 		fiber_free(fiber);
 	}
 
 	/* Free all possible aliving fiber object */
-	for (i = 0; i < __thread_local->slot; i++) {
-		fiber_free(__thread_local->fibers[i]);
+	for (i = 0; i < tf->slot; i++) {
+		fiber_free(tf->fibers[i]);
 	}
 
 	if (tf->fibers) {
@@ -113,16 +117,10 @@ static void thread_free(THREAD *tf)
 	mem_free(tf->stack_buff);
 #endif
 
-	fiber_real_free(tf->original);
+	fiber = tf->original;
 	mem_free(tf);
 
-#ifdef THREAD_LOCAL_DYNAMIC
-	if (thread_self() != main_thread_self()) {
-		pthread_setspecific(__fiber_key, NULL);
-	}
-#else
-	__thread_local = NULL;
-#endif
+	fiber_real_free(fiber);
 }
 
 static void free_atomic_onexit(void)
@@ -140,7 +138,7 @@ static void thread_exit(void *ctx)
 	}
 }
 
-static void thread_init(void)
+static void thread_once(void)
 {
 	if (pthread_key_create(&__fiber_key, thread_exit) != 0) {
 		msg_fatal("%s(%d), %s: pthread_key_create error %s",
@@ -157,29 +155,9 @@ static void thread_init(void)
 	atexit(free_atomic_onexit);
 }
 
-static pthread_once_t __once_control = PTHREAD_ONCE_INIT;
-
-static void fiber_check(void)
+static void thread_init(void)
 {
 	THREAD *local;
-
-#ifndef THREAD_LOCAL_DYNAMIC
-	if (__thread_local != NULL) {
-		return;
-	}
-#endif
-
-	if (pthread_once(&__once_control, thread_init) != 0) {
-		printf("%s(%d), %s: pthread_once error %s\r\n",
-			__FILE__, __LINE__, __FUNCTION__, last_serror());
-		abort();
-	}
-
-#ifdef THREAD_LOCAL_DYNAMIC
-	if (__thread_local != NULL) {
-		return;
-	}
-#endif
 
 	local = (THREAD *) mem_calloc(1, sizeof(THREAD));
 
@@ -211,6 +189,30 @@ static void fiber_check(void)
 #else
 	__thread_local = local;
 #endif
+}
+
+static pthread_once_t __once_control = PTHREAD_ONCE_INIT;
+
+static void fiber_check(void)
+{
+#ifndef THREAD_LOCAL_DYNAMIC
+	if (__thread_local != NULL) {
+		return;
+	}
+#endif
+
+	if (pthread_once(&__once_control, thread_once) != 0) {
+		printf("%s(%d), %s: pthread_once error %s\r\n",
+			__FILE__, __LINE__, __FUNCTION__, last_serror());
+		abort();
+	}
+
+#ifdef THREAD_LOCAL_DYNAMIC
+	if (__thread_local != NULL) {
+		return;
+	}
+#endif
+	thread_init();
 }
 
 ACL_FIBER *fiber_origin(void)
