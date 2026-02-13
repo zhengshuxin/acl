@@ -120,91 +120,104 @@ int pthread_once(pthread_once_t *once_control, void (*init_routine)(void))
 
 ///////////////////////////////////////////////////////////////////////////////
 
-typedef struct {
-	pthread_key_t tkey;
-	void (*destructor)(void *);
-	FIFO *keys;
-} TLS_KEY;
+#include "common/htable.h"
 
-static pthread_key_t   __tls_key      = TLS_OUT_OF_INDEXES;
-static pthread_key_t   __fls_key      = FLS_OUT_OF_INDEXES;
+typedef struct FLS_KEY FLS_KEY;
+typedef struct TLS_KEY TLS_KEY;
+
+struct FLS_KEY {
+	HTABLE *keys;
+};
+
+struct TLS_KEY {
+	pthread_key_t key;
+	void (*destructor)(void *);
+	FIFO *objs;
+};
+
+static pthread_key_t   __tls_key  = TLS_OUT_OF_INDEXES;
+static pthread_key_t   __fls_key  = FLS_OUT_OF_INDEXES;
 
 extern int acl_fiber_scheduled(void);
 
 static void thread_exit(void *ctx)
 {
-	TLS_KEY *tkey = (TLS_KEY *) ctx;
-	void (*destructor)(void*);
-	void *context;
+	FLS_KEY *fkey = (FLS_KEY *) ctx;
+	void *ctx;
 
-	if (tkey->keys) {
-		TLS_KEY *iter;
-		while ((iter = (TLS_KEY *) tkey->keys->pop_back(tkey->keys))) {
-			if (iter->destructor) {
-				destructor = iter->destructor;
-				context = TlsGetValue(iter->tkey);
-				mem_free(iter);
+	assert(fkey);
+	assert(fkey->keys);
 
-				destructor(context);
-			}
+	ITER iter;
+	foreach(iter, fkey->keys) {
+		TLS_KEY *tkey = (TLS_KEY *) iter.data;
+		assert(tkey);
+
+		if (tkey->destructor == NULL) {
+			continue;
 		}
+
+		while ((ctx = tkey->objs->pop_front(tkey->objs))) {
+			tkey->destructor(ctx);
+		}
+
+		fifo_free(tkey->objs, NULL);
 	}
 
-	destructor = tkey->destructor;
-	context = TlsGetValue(tkey->tkey);
-
-	fifo_free(tkey->keys, mem_free);
+	htable_free(tkey->keys, mem_free);
 	mem_free(tkey);
-
-	if (destructor) {
-		destructor(context);
-	}
 }
 
 /* 每个进程的唯一初始化函数 */
 
-static void pthread_init_once(void)
+static void thread_once(void)
 {
 	__tls_key = TlsAlloc();
 	__fls_key = FlsAlloc(thread_exit);
 }
 
+static void hash_key(pthread_key_t key, char *buf, size_t n)
+{
+	assert(n > 10);
+	_snprintf(buf, n, "%d", key);
+	buf[n - 1] = '\0';
+}
+
 int pthread_key_create(pthread_key_t *key_ptr, void (*destructor)(void*))
 {
-	pthread_once(&__control_once, pthread_init_once);
+	pthread_once(&__control_once, thread_once);
+
+	assert(__tls_key != TLS_OUT_OF_INDEXES);
+	assert(__fls_key != FLS_OUT_OF_INDEXES);
 
 	if (*key_ptr <= 0 && *key_ptr != TLS_OUT_OF_INDEXES) {
 		*key_ptr = TlsAlloc();
 		assert(*key_ptr != TLS_OUT_OF_INDEXES);
 	}
 
-	TLS_KEY *tkey    = (TLS_KEY*) mem_calloc(sizeof(TLS_KEY), 1), *curr;
-	tkey->tkey       = *key_ptr;
+	TLS_KEY *tkey    = (TLS_KEY*) mem_calloc(sizeof(TLS_KEY), 1);
+	tkey->key        = *key_ptr;
 	tkey->destructor = destructor;
+	tkey->objs       = fifo_new();
 
-	if (acl_fiber_scheduled()) {
-		curr = (TLS_KEY *) TlsGetValue(__tls_key);
-		if (curr && curr->keys) {
-			curr->keys->push_back(curr->keys, tkey);
-		} else {
-			msg_error("%s(%d): no TLS_KEY for key=%d",
-				__FUNCTION__, __LINE__, __tls_key);
+	char kbuf[32];
+	hash_key(*key_ptr, kbuf, sizeof(kbuf));
+	FLS_KEY *fkey;
+
+	if ((fkey = (FLS_KEY *) TlsGetValue(__tls_key)) == NULL) {
+		if (acl_fiber_scheduled()) {
+			msg_fatal("%s(%d): should be in thread mode",
+				__FUNCTION__, __LINE__);
 		}
-	} else if (__tls_key == TLS_OUT_OF_INDEXES) {
-		msg_error("%s(%d): __tls_key is invalid", __FUNCTION__, __LINE__);
-	} else if ((curr = TlsGetValue(__tls_key)) != NULL) {
-		if (curr->keys) {
-			curr->keys->push_back(curr->keys, tkey);
-		} else {
-			msg_error("%s(%d): keys is null", __FUNCTION__, __LINE__);
-		}
-	} else {
-		assert(__fls_key != FLS_OUT_OF_INDEXES);
-		tkey->keys = fifo_new();
-		TlsSetValue(__tls_key, tkey);
-		FlsSetValue(__fls_key, tkey);
+
+		fkey = (FLS_KEY *) mem_calloc(sizeof(FLS_KEY), 1);
+		fkey->keys = htable_create(10);
+
+		TlsSetValue(__tls_key, fkey);
+		FlsSetValue(__fls_key, fkey);
 	}
 
+	htable_enter(fkey->keys, kbuf, tkey);
 	return 0;
 }
 
@@ -215,18 +228,36 @@ void *pthread_getspecific(pthread_key_t key)
 
 int pthread_setspecific(pthread_key_t key, void *value)
 {
-	if (key <= 0 || key == TLS_OUT_OF_INDEXES) {
+	if (key < 0 || key == TLS_OUT_OF_INDEXES) {
 		msg_error("%s(%d): key(%d) invalid", __FUNCTION__, __LINE__, key);
 		return EINVAL;
 	}
 
-	if (TlsSetValue(key, value)) {
-		return 0;
-	} else {
+	FLS_KEY *fkey = (FLS_KEY *) TlsGetValue(__tls_key);
+	if (fkey == NULL) {
+		msg_error("%s(%d): no FLS_KEY for __tls_key=%d",
+			__FUNCTION__, __LINE__, __fls_key);
+		return EINVAL;
+	}
+
+	char kbuf[32];
+	hash_key(key, kbuf, sizeof(kbuf));
+
+	TLS_KEY *tkey = (TLS_KEY *) htable_find(fkey->keys, kbuf);
+	if (tkey == NULL) {
+		msg_error("%s(%d): no TLS_KEY for key=%d, __tls_key=%d",
+			__FUNCTION__, __LINE__, key, __tls_key);
+		return EINVAL;
+	}
+
+	if (!TlsSetValue(key, value)) {
 		msg_error("%s(%d): TlsSetValue(key=%d) error(%s)",
 			__FUNCTION__, __LINE__, key, last_serror());
 		return -1;
 	}
+
+	tkey->objs->push_back(tkey->objs, value);
+	return 0;
 }
 
 #endif /* USE_FLS */
