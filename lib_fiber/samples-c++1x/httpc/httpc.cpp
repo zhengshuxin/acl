@@ -51,6 +51,7 @@ static void usage(const char* procname) {
 
 static void fiber_main(ACL_FIBER *, void*) {
 		printf("hello world!\r\n");
+		acl::fiber::delay(100);
 }
 
 static void test() {
@@ -68,7 +69,7 @@ int main(int argc, char *argv[]) {
 	acl::acl_cpp_init();
 	acl::log::stdout_open(true);
 
-	test(); return 0;
+	test();
 
 	while ((ch = getopt(argc, argv, "he:s:c:n:")) > 0) {
 		switch (ch) {

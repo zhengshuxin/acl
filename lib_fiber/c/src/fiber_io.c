@@ -316,7 +316,6 @@ static void fiber_io_loop(ACL_FIBER *self fiber_unused, void *ctx)
 
 	// Don't set ev_fiber NULL here, using fiber_io_clear() to set it NULL
 	// in acl_fiber_schedule() after scheduling finished.
-	// 
 }
 
 void fiber_io_clear(void)

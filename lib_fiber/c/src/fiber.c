@@ -120,6 +120,7 @@ static void thread_free(THREAD *tf)
 	fiber = tf->original;
 	mem_free(tf);
 
+	// Make sure the original fiber is the last one to be freed.
 	fiber_real_free(fiber);
 }
 
@@ -182,6 +183,8 @@ static void thread_init(void)
 	ring_init(&local->dead);
 
 #ifdef THREAD_LOCAL_DYNAMIC
+	pthread_fkey_create();
+
 	if (pthread_setspecific(__fiber_key, local) != 0) {
 		printf("pthread_setspecific error!\r\n");
 		abort();
@@ -845,13 +848,16 @@ void acl_fiber_schedule_with(int event_mode)
 	acl_fiber_schedule();
 }
 
-#if defined(_WIN32) || defined(_WIN64)
+#ifdef _TEST
+# if defined(_WIN32) || defined(_WIN64)
 static pthread_key_t dummy_key;
 
 static void thread_exit_dummy(void* ctx fiber_unused)
 {
-	msg_info("%s(%d): schedule end now, key=%d\r\n", __FUNCTION__, __LINE__, dummy_key);
+	msg_info("%s(%d): thread=%ld, schedule end now, key=%d\r\n",
+		__FUNCTION__, __LINE__, thread_self(), dummy_key);
 }
+# endif
 #endif
 
 void acl_fiber_schedule(void)
@@ -867,11 +873,15 @@ void acl_fiber_schedule(void)
 	set_time_metric(1000);
 #endif
 
-#if defined(_WIN32) || defined(_WIN64)
+#ifdef _TEST
+# if defined(_WIN32) || defined(_WIN64)
 	// On windows, the __tls_key in pthread_key_create() must be created in no
 	// fiber mode, because the destructor set in FlsAlloc must in no fiber mode.
 	// See: https://github.com/acl-dev/acl/issues/363
+	pthread_fkey_create();
 	pthread_key_create(&dummy_key, thread_exit_dummy);
+	pthread_setspecific(dummy_key, NULL);
+# endif
 #endif
 
 	fiber_check();
@@ -897,7 +907,10 @@ void acl_fiber_schedule(void)
 	}
 
 	/* Release dead fiber */
-	while ((head = ring_pop_head(&__thread_local->dead)) != NULL) {
+	THREAD *local = __thread_local;
+	assert(local);
+
+	while ((head = ring_pop_head(&local->dead)) != NULL) {
 		fiber = RING_TO_APPL(head, ACL_FIBER, me);
 		fiber_free(fiber);
 	}

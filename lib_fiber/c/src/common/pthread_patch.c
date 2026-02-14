@@ -47,7 +47,7 @@ int pthread_key_create(pthread_key_t* key, void (*destructor)(void*))
     if (!key)
         return -1;
 
-    DWORD k = FlsAlloc((PFLS_CALLBACK_FUNCTION)destructor);
+    DWORD k = FlsAlloc((PFLS_KEY_FUNCTION)destructor);
 
     if (k == FLS_OUT_OF_INDEXES)
         return -1;
@@ -122,59 +122,30 @@ int pthread_once(pthread_once_t *once_control, void (*init_routine)(void))
 
 #include "common/htable.h"
 
-typedef struct FLS_KEY FLS_KEY;
-typedef struct TLS_KEY TLS_KEY;
-
-struct FLS_KEY {
-	HTABLE *keys;
-};
-
-struct TLS_KEY {
+typedef struct TLS_KEY {
 	pthread_key_t key;
 	void (*destructor)(void *);
-	FIFO *objs;
-};
+} TLS_KEY;
 
-static pthread_key_t   __tls_key  = TLS_OUT_OF_INDEXES;
-static pthread_key_t   __fls_key  = FLS_OUT_OF_INDEXES;
+typedef struct TLS_OBJ {
+	pthread_key_t key;
+	void *value;
+} TLS_OBJ;
+
+typedef struct FLS_KEY {
+	FIFO *locals; // Hold TLS_OBJ
+} FLS_KEY;
+
+typedef struct PROC_KEYS {
+	HTABLE *keys; // tkey => TLS_KEY
+} PROC_KEYS;
+
+static pthread_key_t __tls_key = TLS_OUT_OF_INDEXES;
+static pthread_key_t __fls_key = FLS_OUT_OF_INDEXES;
+static PROC_KEYS      *__pkeys = NULL;
+static pthread_mutex_t __lock;
 
 extern int acl_fiber_scheduled(void);
-
-static void thread_exit(void *ctx)
-{
-	FLS_KEY *fkey = (FLS_KEY *) ctx;
-	void *ctx;
-
-	assert(fkey);
-	assert(fkey->keys);
-
-	ITER iter;
-	foreach(iter, fkey->keys) {
-		TLS_KEY *tkey = (TLS_KEY *) iter.data;
-		assert(tkey);
-
-		if (tkey->destructor == NULL) {
-			continue;
-		}
-
-		while ((ctx = tkey->objs->pop_front(tkey->objs))) {
-			tkey->destructor(ctx);
-		}
-
-		fifo_free(tkey->objs, NULL);
-	}
-
-	htable_free(tkey->keys, mem_free);
-	mem_free(tkey);
-}
-
-/* 每个进程的唯一初始化函数 */
-
-static void thread_once(void)
-{
-	__tls_key = TlsAlloc();
-	__fls_key = FlsAlloc(thread_exit);
-}
 
 static void hash_key(pthread_key_t key, char *buf, size_t n)
 {
@@ -183,8 +154,76 @@ static void hash_key(pthread_key_t key, char *buf, size_t n)
 	buf[n - 1] = '\0';
 }
 
+static void thread_exit(void *ctx)
+{
+	FLS_KEY *fkey = (FLS_KEY *) ctx;
+	assert(fkey && fkey->locals);
+
+	// The first one is set in thread_init() in fiber.c, it should be called
+	// in the end, because the original fiber will be freed that it means
+	// the current thread will be end and the thread context will freed.
+	TLS_OBJ *first = fifo_pop_front(fkey->locals), *obj;
+	assert(first);
+
+	char key[32];
+
+	pthread_mutex_lock(&__lock);
+
+	while ((obj = fifo_pop_front(fkey->locals))) {
+		hash_key(obj->key, key, sizeof(key));
+		TLS_KEY *tkey = (TLS_KEY*) htable_find(__pkeys->keys, key);
+		if (tkey == NULL || tkey->destructor == NULL) {
+			continue;
+		}
+		tkey->destructor(obj->value);
+		mem_free(obj);
+	}
+
+	fifo_free(fkey->locals, NULL);
+	mem_free(fkey);
+
+	hash_key(first->key, key, sizeof(key));
+	TLS_KEY *tkey = (TLS_KEY*) htable_find(__pkeys->keys, key);
+	assert(tkey);
+
+	pthread_mutex_unlock(&__lock);
+
+	void *value = first->value;
+	mem_free(first);
+
+	// Must the __fls_key's value to NULL to avoid the thread_exit
+	// to be triggered again for the current thread when the original
+	// fiber is deleted.
+	FlsSetValue(__fls_key, NULL);
+	tkey->destructor(value);
+}
+
+static void thread_once(void)
+{
+	__tls_key = TlsAlloc();
+	__fls_key = FlsAlloc(thread_exit);
+	__pkeys   = (PROC_KEYS *) mem_calloc(1, sizeof(PROC_KEYS));
+	__pkeys->keys = htable_create(10);
+	pthread_mutex_init(&__lock, NULL);
+}
+
+void pthread_fkey_create(void)
+{
+	pthread_once(&__control_once, thread_once);
+
+	FLS_KEY *fkey = (FLS_KEY*) TlsGetValue(__tls_key);
+	if (fkey == NULL) {
+		assert(!acl_fiber_scheduled());
+		fkey = (FLS_KEY*) mem_calloc(sizeof(FLS_KEY), 1);
+		fkey->locals = fifo_new();
+		FlsSetValue(__fls_key, fkey);
+		TlsSetValue(__tls_key, fkey);
+	}
+}
+
 int pthread_key_create(pthread_key_t *key_ptr, void (*destructor)(void*))
 {
+	char kbuf[32];
 	pthread_once(&__control_once, thread_once);
 
 	assert(__tls_key != TLS_OUT_OF_INDEXES);
@@ -193,37 +232,27 @@ int pthread_key_create(pthread_key_t *key_ptr, void (*destructor)(void*))
 	if (*key_ptr <= 0 && *key_ptr != TLS_OUT_OF_INDEXES) {
 		*key_ptr = TlsAlloc();
 		assert(*key_ptr != TLS_OUT_OF_INDEXES);
+	} else {
+		hash_key(*key_ptr, kbuf, sizeof(kbuf));
+		pthread_mutex_lock(&__lock);
+		if (htable_find(__pkeys->keys, kbuf)) {
+			pthread_mutex_unlock(&__lock);
+			return 0;
+		}
+		*key_ptr = TlsAlloc();
+		assert(*key_ptr != TLS_OUT_OF_INDEXES);
 	}
 
-	TLS_KEY *tkey    = (TLS_KEY*) mem_calloc(sizeof(TLS_KEY), 1);
+	TLS_KEY *tkey = (TLS_KEY*) mem_calloc(sizeof(TLS_KEY), 1);
 	tkey->key        = *key_ptr;
 	tkey->destructor = destructor;
-	tkey->objs       = fifo_new();
 
-	char kbuf[32];
 	hash_key(*key_ptr, kbuf, sizeof(kbuf));
-	FLS_KEY *fkey;
 
-	if ((fkey = (FLS_KEY *) TlsGetValue(__tls_key)) == NULL) {
-		if (acl_fiber_scheduled()) {
-			msg_fatal("%s(%d): should be in thread mode",
-				__FUNCTION__, __LINE__);
-		}
-
-		fkey = (FLS_KEY *) mem_calloc(sizeof(FLS_KEY), 1);
-		fkey->keys = htable_create(10);
-
-		TlsSetValue(__tls_key, fkey);
-		FlsSetValue(__fls_key, fkey);
-	}
-
-	htable_enter(fkey->keys, kbuf, tkey);
+	pthread_mutex_lock(&__lock);
+	htable_enter(__pkeys->keys, kbuf, tkey);
+	pthread_mutex_unlock(&__lock);
 	return 0;
-}
-
-void *pthread_getspecific(pthread_key_t key)
-{
-	return TlsGetValue(key);
 }
 
 int pthread_setspecific(pthread_key_t key, void *value)
@@ -233,22 +262,27 @@ int pthread_setspecific(pthread_key_t key, void *value)
 		return EINVAL;
 	}
 
-	FLS_KEY *fkey = (FLS_KEY *) TlsGetValue(__tls_key);
-	if (fkey == NULL) {
-		msg_error("%s(%d): no FLS_KEY for __tls_key=%d",
-			__FUNCTION__, __LINE__, __fls_key);
-		return EINVAL;
-	}
+	assert(__tls_key != TLS_OUT_OF_INDEXES);
+	assert(__pkeys);
 
 	char kbuf[32];
 	hash_key(key, kbuf, sizeof(kbuf));
 
-	TLS_KEY *tkey = (TLS_KEY *) htable_find(fkey->keys, kbuf);
+	pthread_mutex_lock(&__lock);
+	TLS_KEY *tkey = (TLS_KEY*) htable_find(__pkeys->keys, kbuf);
+	pthread_mutex_unlock(&__lock);
+
 	if (tkey == NULL) {
-		msg_error("%s(%d): no TLS_KEY for key=%d, __tls_key=%d",
-			__FUNCTION__, __LINE__, key, __tls_key);
+		msg_error("%s(%d): no TLS_KEY for key=%d", __FUNCTION__, __LINE__, key);
 		return EINVAL;
 	}
+
+	FLS_KEY *fkey = (FLS_KEY*) TlsGetValue(__tls_key);
+	assert(fkey && fkey->locals);
+	TLS_OBJ *obj = (TLS_OBJ*) mem_calloc(1, sizeof(TLS_OBJ));
+	obj->key = key;
+	obj->value = value;
+	fkey->locals->push_back(fkey->locals, obj);
 
 	if (!TlsSetValue(key, value)) {
 		msg_error("%s(%d): TlsSetValue(key=%d) error(%s)",
@@ -256,8 +290,12 @@ int pthread_setspecific(pthread_key_t key, void *value)
 		return -1;
 	}
 
-	tkey->objs->push_back(tkey->objs, value);
 	return 0;
+}
+
+void *pthread_getspecific(pthread_key_t key)
+{
+	return TlsGetValue(key);
 }
 
 #endif /* USE_FLS */

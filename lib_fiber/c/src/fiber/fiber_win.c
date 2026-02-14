@@ -56,8 +56,9 @@ void acl_fiber_stackfree(ACL_FIBER_STACK *stack)
 void fiber_real_free(ACL_FIBER *fiber)
 {
 	FIBER_WIN *fb = (FIBER_WIN *) fiber;
-	DeleteFiber(fb->context);
+	LPVOID ctx = fb->context;
 	stack_free(fb);
+	DeleteFiber(ctx);
 }
 
 void fiber_real_swap(ACL_FIBER *from, ACL_FIBER *to)

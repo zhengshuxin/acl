@@ -30,6 +30,7 @@ struct pthread_mutexattr_t {
 
 FIBER_API int pthread_once(pthread_once_t *once_control, void (*init_routine)(void));
 int pthread_key_create(pthread_key_t *key_ptr, void (*destructor)(void*));
+void pthread_fkey_create(void);
 
 void *pthread_getspecific(pthread_key_t key);
 int pthread_setspecific(pthread_key_t key, void *value);
