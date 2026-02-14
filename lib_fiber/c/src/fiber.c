@@ -183,7 +183,9 @@ static void thread_init(void)
 	ring_init(&local->dead);
 
 #ifdef THREAD_LOCAL_DYNAMIC
+# if defined(_WIN32) || defined(_WIN64)
 	pthread_fkey_create();
+# endif
 
 	if (pthread_setspecific(__fiber_key, local) != 0) {
 		printf("pthread_setspecific error!\r\n");
