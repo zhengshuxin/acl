@@ -57,6 +57,9 @@ The Acl project includes a rich set of functional modules: network communication
     * [6.1. Software Layered Architecture](#61-software-layered-architecture)
     * [6.2. Project Directory Structure](#62-project-directory-structure)
 
+* [Real-World Products Built with acl](#real-world-products-built-with-acl)
+    * [webcool](#webcool)
+
 <hr>
 
 # 1. Six Core Modules
@@ -858,4 +861,24 @@ acl/
 └── changes.txt                 # Change log
 ```
 
+## Real-World Products Built with acl
 
+### webcool
+
+[webcool](https://webcool.cn/) is a personal cloud drive and private file management product built with acl. It can be self-hosted on a private server, workstation, or home network. Its C++ server applies acl's networking, HTTP service, concurrency, and server framework capabilities in a real-world cross-platform product.
+
+Key webcool capabilities include:
+
+- Remote virtual disk and server-local disk management;
+- File upload, download, copy, move, tags, locks, recycle bin, backup, and storage migration;
+- Preview support for images, video, audio, PDF, Office, Markdown, XMind, and other formats;
+- Browser-based video editing, audio and subtitle track management, transcoding, and quality enhancement;
+- AI image upscaling, deblurring, red-eye removal, watermark removal, and face restoration;
+- iOS and Android clients with album backup, offline cache, and video casting;
+- Cross-platform deployment on Windows, macOS, and Linux.
+
+On the server side, webcool uses acl's high-performance networking and HTTP infrastructure, coroutine-based concurrency model, service management capabilities, and database wrappers to combine file management, media processing, and multi-device access in a long-running application.
+
+- Product website: [https://webcool.cn/](https://webcool.cn/)
+- Live demo: [https://demo.webcool.cn/](https://demo.webcool.cn/)
+- Downloads: [https://webcool.cn/download/](https://webcool.cn/download/)
