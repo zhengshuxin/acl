@@ -757,7 +757,7 @@ void connect_pool::keep_conns(size_t min, thread_pool& threads)
 		alive_ = true;
 		if (max_ > 0 && count_ >= max_) {
 			lock_.unlock();
-			delete *it;
+			delete conn;
 			continue;
 		}
 		lock_.unlock();
